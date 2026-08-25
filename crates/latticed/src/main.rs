@@ -10,8 +10,8 @@ use clap::{Parser, Subcommand};
 use lattice_net::discovery::{Advertisement, Discovery, PeerEvent};
 use lattice_net::identity::default_data_dir;
 use lattice_net::{
-    AcceptAnyPeer, DeviceId, DeviceKey, Endpoint, PairingCode, TrustStore, TrustedPeers, pairing,
-    probe,
+    AcceptAnyPeer, DeviceId, DeviceKey, Endpoint, PairingCode, RefuseControl, TrustStore,
+    TrustedPeers, dispatch, pairing, probe,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -230,8 +230,9 @@ async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, 
         match incoming {
             Ok(conn) => {
                 println!("peer {} connected from {}", conn.peer_id(), conn.remote_address());
+                let conn = Arc::new(conn);
                 tokio::spawn(async move {
-                    let _ = probe::serve(&conn).await;
+                    let _ = dispatch::serve(conn, Arc::new(RefuseControl)).await;
                 });
             }
             // An unpaired device reaching us is expected on a shared network.

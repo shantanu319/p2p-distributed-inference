@@ -96,15 +96,7 @@ fn probe_stream(kind: StreamKind) -> StreamHeader {
     }
 }
 
-/// Answers probes until the connection closes. Run this for every peer.
-pub async fn serve(conn: &Connection) -> Result<(), Error> {
-    while let Ok((_, send, recv)) = conn.accept_stream().await {
-        tokio::spawn(serve_stream(send, recv));
-    }
-    Ok(())
-}
-
-async fn serve_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream) {
+pub(crate) async fn serve_stream(mut send: quinn::SendStream, mut recv: quinn::RecvStream) {
     let mut opcode = [0u8; 1];
     while recv.read_exact(&mut opcode).await.is_ok() {
         let handled = match opcode[0] {

@@ -3,6 +3,7 @@
 pub mod codec;
 pub mod control;
 pub mod discovery;
+pub mod dispatch;
 pub mod identity;
 pub mod pairing;
 pub mod probe;
@@ -12,6 +13,7 @@ pub mod transport;
 pub mod trust;
 
 pub use control::{ControlHandler, Introduction, Request, Response};
+pub use dispatch::RefuseControl;
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
 pub use identity::{DeviceId, DeviceKey};
 pub use pairing::{Pairing, PairingCode};

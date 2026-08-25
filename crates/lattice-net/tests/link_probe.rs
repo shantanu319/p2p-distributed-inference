@@ -3,6 +3,7 @@
 
 use ed25519_dalek::VerifyingKey;
 use lattice_net::probe::{self, LinkQuality};
+use lattice_net::{RefuseControl, dispatch};
 use lattice_net::transport::PeerPolicy;
 use lattice_net::{DeviceKey, Endpoint};
 use std::sync::Arc;
@@ -30,8 +31,8 @@ async fn a_link_can_be_measured_over_a_paired_connection() {
     let a_addr = a.local_addr().unwrap();
 
     tokio::spawn(async move {
-        let responder = a.accept().await.unwrap().unwrap();
-        let _ = probe::serve(&responder).await;
+        let responder = Arc::new(a.accept().await.unwrap().unwrap());
+        let _ = dispatch::serve(responder, Arc::new(RefuseControl)).await;
     });
 
     let conn = b.connect(a_addr).await.unwrap();
