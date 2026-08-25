@@ -1,0 +1,8 @@
+[package]
+name = "latticed"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lattice-net.workspace = true

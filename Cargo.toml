@@ -1,0 +1,11 @@
+[workspace]
+resolver = "3"
+members = ["crates/lattice-net", "crates/latticed"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+lattice-net = { path = "crates/lattice-net" }
