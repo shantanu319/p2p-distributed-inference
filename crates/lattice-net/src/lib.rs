@@ -2,9 +2,11 @@
 
 pub mod discovery;
 pub mod identity;
+pub mod trust;
 
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
 pub use identity::{DeviceId, DeviceKey};
+pub use trust::{PairedPeer, TrustStore};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -16,6 +18,8 @@ pub enum Error {
     MalformedDeviceId(String),
     #[error("mdns: {0}")]
     Mdns(#[from] mdns_sd::Error),
+    #[error("trusted-devices file is corrupt: {0}")]
+    TrustStore(#[from] serde_json::Error),
     #[error("no OS data directory available")]
     NoDataDir,
 }
