@@ -49,11 +49,20 @@ const CONNECTION_WINDOW: u32 = 32 << 20;
 const KEEP_ALIVE: Duration = Duration::from_secs(10);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A handshake that has not completed by now is not going to. Without this a
+/// dial to an address nothing listens on waits out the full idle timeout, so
+/// trying a peer's several advertised addresses looks like a hang.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 // These relationships are the whole point of the constants above, so they are
 // checked at compile time rather than left to a test someone might delete.
 const _: () = assert!(
     KEEP_ALIVE.as_secs() * 2 < IDLE_TIMEOUT.as_secs(),
     "a single lost keepalive must not close a live connection"
+);
+const _: () = assert!(
+    CONNECT_TIMEOUT.as_secs() < IDLE_TIMEOUT.as_secs(),
+    "a dead address must be abandoned before the idle timeout would notice"
 );
 const _: () = assert!(
     CONNECTION_WINDOW > STREAM_RECEIVE_WINDOW,
@@ -147,8 +156,13 @@ impl Endpoint {
         // The SNI name is unused: the peer is identified by its key, and the
         // verifier ignores names entirely.
         let connecting = self.endpoint.connect(addr, "lattice")?;
-        let conn = self.wrap(connecting.await?, Role::Dialer)?;
-        conn.confirm().await?;
+        let conn = tokio::time::timeout(CONNECT_TIMEOUT, async {
+            let conn = self.wrap(connecting.await?, Role::Dialer)?;
+            conn.confirm().await?;
+            Ok::<_, Error>(conn)
+        })
+        .await
+        .map_err(|_| Error::Stream(format!("{addr} did not answer within {CONNECT_TIMEOUT:?}")))??;
         Ok(conn)
     }
 
