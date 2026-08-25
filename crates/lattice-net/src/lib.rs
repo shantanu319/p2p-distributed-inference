@@ -1,6 +1,7 @@
 //! Discovery, pairing, and authenticated transport between Lattice devices.
 
 pub mod codec;
+pub mod control;
 pub mod discovery;
 pub mod identity;
 pub mod pairing;
@@ -10,6 +11,7 @@ pub mod tls;
 pub mod transport;
 pub mod trust;
 
+pub use control::{ControlHandler, Introduction, Request, Response};
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
 pub use identity::{DeviceId, DeviceKey};
 pub use pairing::{Pairing, PairingCode};
