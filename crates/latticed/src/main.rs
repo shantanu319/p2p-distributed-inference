@@ -326,9 +326,7 @@ fn locate(wanted: &[DeviceId]) -> Result<HashMap<DeviceId, Vec<SocketAddr>>> {
         };
         match browser.next_event(remaining) {
             Some(PeerEvent::Found(peer)) if wanted.contains(&peer.device_id) => {
-                let mut addrs = peer.addrs;
-                addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback()));
-                found.insert(peer.device_id, addrs);
+                found.insert(peer.device_id, usable(peer.addrs));
             }
             Some(_) => {}
             None => break,
@@ -356,13 +354,10 @@ fn resolve(target: &str, self_id: DeviceId) -> Result<Vec<SocketAddr>> {
     while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
         match browser.next_event(remaining) {
             Some(PeerEvent::Found(peer)) if peer.device_id == wanted => {
-                let mut addrs = peer.addrs;
+                let addrs = usable(peer.addrs);
                 if addrs.is_empty() {
-                    bail!("{wanted} advertised no address");
+                    bail!("{wanted} advertised no address this device can reach");
                 }
-                // A routable address first, then loopback; IPv4 before IPv6,
-                // since the endpoint binds IPv4.
-                addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback()));
                 return Ok(addrs);
             }
             Some(_) => {}
@@ -375,35 +370,39 @@ fn resolve(target: &str, self_id: DeviceId) -> Result<Vec<SocketAddr>> {
     bail!("could not find {wanted} on the network — pass a host:port instead")
 }
 
-/// Tries each advertised address in turn. A peer commonly publishes addresses
-/// on interfaces that cannot reach us, so the first is not necessarily good.
+/// The advertised addresses this device can actually dial, best first.
 ///
-/// The local endpoint is bound per attempt to match the target's address
-/// family: a UDP socket bound to IPv4 cannot send to an IPv6 peer.
+/// Link-local IPv6 is dropped because reaching it needs the interface scope,
+/// which is lost when an mDNS record is turned into a plain SocketAddr. The
+/// rest of IPv6 is dropped because listeners bind IPv4 (see bench/README.md);
+/// remove that filter when they no longer do.
+fn usable(addrs: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let mut usable: Vec<_> = addrs.into_iter().filter(|a| a.is_ipv4()).collect();
+    usable.sort_by_key(|a| a.ip().is_loopback());
+    usable
+}
+
+/// Tries each address in turn. A peer publishes every interface it has, and
+/// most of them cannot reach any given caller.
 async fn connect_any(
     key: &DeviceKey,
     policy: Arc<dyn lattice_net::PeerPolicy>,
     addrs: &[SocketAddr],
 ) -> Result<(Endpoint, lattice_net::Connection)> {
-    let mut last = None;
+    if addrs.is_empty() {
+        bail!("no reachable address for that device");
+    }
+    let mut failures = Vec::new();
     for addr in addrs {
-        let endpoint = Endpoint::bind(ephemeral_like(*addr), key, policy.clone())?;
+        let endpoint = Endpoint::bind(bind_addr(0), key, policy.clone())?;
         match endpoint.connect(*addr).await {
             Ok(conn) => return Ok((endpoint, conn)),
-            Err(e) => last = Some((addr, e)),
+            // Report every attempt: "it did not connect" is useless when a
+            // peer advertised four addresses.
+            Err(e) => failures.push(format!("  {addr}: {e}")),
         }
     }
-    match last {
-        Some((addr, e)) => Err(e).with_context(|| format!("could not reach {addr}")),
-        None => bail!("no addresses to try"),
-    }
-}
-
-fn ephemeral_like(target: SocketAddr) -> SocketAddr {
-    match target {
-        SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
-        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
-    }
+    bail!("could not reach that device:\n{}", failures.join("\n"))
 }
 
 fn bind_addr(port: u16) -> SocketAddr {
