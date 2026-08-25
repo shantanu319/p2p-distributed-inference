@@ -18,7 +18,9 @@ pub fn detect() -> HostFacts {
 }
 
 fn hostname() -> String {
-    let mut buf = [0i8; 256];
+    // c_char is i8 on x86_64 but u8 on aarch64 Linux, so it must not be
+    // spelled concretely.
+    let mut buf = [0 as libc::c_char; 256];
     // SAFETY: buf is a valid writable buffer of the length passed.
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) };
     if rc != 0 {
@@ -52,11 +54,17 @@ fn total_memory() -> u64 {
 
 #[cfg(not(target_os = "macos"))]
 fn total_memory() -> u64 {
-    let Ok(meminfo) = std::fs::read_to_string("/proc/meminfo") else {
-        return 0;
-    };
-    meminfo
-        .lines()
+    std::fs::read_to_string("/proc/meminfo").map_or(0, |text| parse_meminfo(&text))
+}
+
+/// Pulls `MemTotal` out of `/proc/meminfo`, which reports kibibytes.
+///
+/// Compiled on every platform even though only Linux reads the file, so the
+/// parsing is covered by tests on a Mac rather than first exercised on the
+/// machine it matters for.
+#[cfg_attr(target_os = "macos", allow(dead_code))]
+fn parse_meminfo(text: &str) -> u64 {
+    text.lines()
         .find_map(|line| line.strip_prefix("MemTotal:"))
         .and_then(|rest| rest.split_whitespace().next())
         .and_then(|kb| kb.parse::<u64>().ok())
@@ -65,6 +73,24 @@ fn total_memory() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use super::parse_meminfo;
+
+    #[test]
+    fn meminfo_is_read_in_kibibytes() {
+        // Shape taken from a real /proc/meminfo.
+        let sample = "MemTotal:       32791096 kB\n\
+                      MemFree:         1234567 kB\n\
+                      MemAvailable:   28000000 kB\n";
+        assert_eq!(parse_meminfo(sample), 32_791_096 * 1024);
+    }
+
+    #[test]
+    fn a_meminfo_without_memtotal_yields_zero_rather_than_a_wrong_number() {
+        assert_eq!(parse_meminfo("MemFree: 100 kB\n"), 0);
+        assert_eq!(parse_meminfo(""), 0);
+        assert_eq!(parse_meminfo("MemTotal:       not-a-number kB\n"), 0);
+    }
+
     #[test]
     fn this_machine_reports_plausible_facts() {
         let facts = super::detect();

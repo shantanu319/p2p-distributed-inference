@@ -7,12 +7,16 @@ weights on both machines.
 
 ## Build
 
-Rust toolchain only. The rustls provider is `ring` rather than `aws-lc-rs`
-specifically so the Linux box needs no cmake or C toolchain:
+```
+./scripts/setup.sh
+```
 
-```
-cargo build --release -p latticed
-```
+That checks prerequisites, builds, and installs to `~/.local/bin`. You need a
+Rust toolchain (>= 1.85, for edition 2024) and a C compiler.
+
+The rustls provider is `ring` rather than `aws-lc-rs`, which drops the cmake
+and Go requirements — but not the C compiler, since ring compiles its own C and
+assembly. An earlier note here claimed "Rust toolchain only"; that was wrong.
 
 ## Pair the two machines
 
