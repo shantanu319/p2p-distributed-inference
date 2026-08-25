@@ -29,6 +29,20 @@ peer into `trusted_devices.json`, which you can read.
 The code is single-use and one guess per attempt — a wrong digit fails the
 exchange rather than pairing weakly.
 
+## Introduce the devices to each other
+
+With more than two machines, pair each one to the *same* machine, then on that
+machine:
+
+```
+latticed provision
+```
+
+Every device receives the others' keys and pins them, so followers can reach
+each other directly rather than relaying through one machine. `latticed peers`
+then shows which entries you confirmed yourself and which arrived by
+introduction. With exactly two devices this step does nothing.
+
 ## Measure
 
 Leave the Linux box serving:

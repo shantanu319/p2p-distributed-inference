@@ -123,11 +123,17 @@ channels" mechanism — the peer opens as many as it likes, each self-describing
 It generalises §6's activation frame rather than replacing it; §6's per-frame
 header keeps describing payloads within an activation stream.
 
-Three kinds, and they want different treatment:
+Three kinds, and they want different treatment. Note the control row: the first
+draft of this document said one permanent control channel per connection, and
+building it showed that was wrong. A shared channel queues independent messages
+behind each other, and with both devices able to send a request at once there
+is no way to match replies to requests. Opening a stream per exchange costs
+nothing in QUIC and has neither problem. Heartbeating is left to QUIC's own
+keepalive rather than a control message.
 
 | kind | lifetime | carries |
 | --- | --- | --- |
-| **control** | one per connection, permanent | heartbeat, plan push, generation bump, load/unload shard, drain notice |
+| **control** | one per exchange, short-lived | plan push, provisioning, generation bump, load/unload shard, drain notice |
 | **activation** | one per session per boundary | §6 frames, prefill and decode |
 | **bulk** | ephemeral | GGUF transfer between peers (§8), probe payloads |
 
