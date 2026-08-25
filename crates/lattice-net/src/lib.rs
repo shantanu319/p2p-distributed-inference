@@ -3,6 +3,7 @@
 pub mod discovery;
 pub mod identity;
 pub mod pairing;
+pub mod tls;
 pub mod trust;
 
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
@@ -30,6 +31,10 @@ pub enum Error {
     PairingReflected,
     #[error("codec: {0}")]
     Postcard(#[from] postcard::Error),
+    #[error("certificate: {0}")]
+    Certificate(String),
+    #[error("rcgen: {0}")]
+    Rcgen(#[from] rcgen::Error),
     #[error("no OS data directory available")]
     NoDataDir,
 }

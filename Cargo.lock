@@ -644,6 +644,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "x509-parser",
 ]
 
 [[package]]
