@@ -1,5 +1,6 @@
 //! Discovery, pairing, and authenticated transport between Lattice devices.
 
+pub mod codec;
 pub mod discovery;
 pub mod identity;
 pub mod pairing;

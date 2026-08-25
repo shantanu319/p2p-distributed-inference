@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 
+use crate::codec::{read_frame, write_frame};
 use crate::{DeviceKey, Error, PairedPeer};
 
 /// Domain separator. Bump if the pairing wire format ever changes.
@@ -204,36 +205,13 @@ pub async fn exchange(
     let (state, our_message) = Pairing::start(code, conn.channel_binding());
 
     write_frame(&mut send, &our_message).await?;
-    let peer_message = read_frame(&mut recv).await?;
+    let peer_message = read_frame(&mut recv, MAX_FRAME).await?;
 
     let (awaiting, confirm) = state.key_exchange(&peer_message, key, name, platform)?;
     write_frame(&mut send, &postcard::to_allocvec(&confirm)?).await?;
 
-    let peer_confirm: Confirm = postcard::from_bytes(&read_frame(&mut recv).await?)?;
+    let peer_confirm: Confirm = postcard::from_bytes(&read_frame(&mut recv, MAX_FRAME).await?)?;
     awaiting.finish(&peer_confirm)
-}
-
-async fn write_frame(send: &mut quinn::SendStream, payload: &[u8]) -> Result<(), Error> {
-    send.write_all(&(payload.len() as u32).to_le_bytes())
-        .await
-        .map_err(|_| Error::PairingFailed)?;
-    send.write_all(payload).await.map_err(|_| Error::PairingFailed)
-}
-
-async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, Error> {
-    let mut header = [0u8; 4];
-    recv.read_exact(&mut header)
-        .await
-        .map_err(|_| Error::PairingFailed)?;
-    let len = u32::from_le_bytes(header) as usize;
-    if len > MAX_FRAME {
-        return Err(Error::PairingFailed);
-    }
-    let mut payload = vec![0u8; len];
-    recv.read_exact(&mut payload)
-        .await
-        .map_err(|_| Error::PairingFailed)?;
-    Ok(payload)
 }
 
 #[cfg(test)]
