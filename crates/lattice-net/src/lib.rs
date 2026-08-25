@@ -3,6 +3,7 @@
 pub mod discovery;
 pub mod identity;
 pub mod pairing;
+pub mod probe;
 pub mod tls;
 pub mod transport;
 pub mod trust;
@@ -10,6 +11,7 @@ pub mod trust;
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
 pub use identity::{DeviceId, DeviceKey};
 pub use pairing::{Pairing, PairingCode};
+pub use probe::{LinkQuality, measure};
 pub use transport::{Connection, Endpoint, PeerPolicy};
 pub use trust::{PairedPeer, TrustStore};
 
@@ -45,6 +47,8 @@ pub enum Error {
     Connection(#[from] quinn::ConnectionError),
     #[error("peer refused the connection: it has not paired with this device")]
     Rejected,
+    #[error("link probe failed: {0}")]
+    Probe(String),
     #[error("no OS data directory available")]
     NoDataDir,
 }
