@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::stream::{HEADER_LEN, StreamHeader, StreamKind};
 use crate::tls::{DeviceCertificate, channel_binding, peer_key};
 use crate::{DeviceKey, Error};
 
@@ -206,8 +207,7 @@ impl Connection {
     /// that into an error at the point of connection rather than a puzzling
     /// failure on first use.
     async fn confirm(&self) -> Result<(), Error> {
-        let (mut send, mut recv) = self.open_stream().await?;
-        let _ = send.set_priority(PRIORITY_CONTROL);
+        let (mut send, mut recv) = self.control_stream().await?;
         send.write_all(&HELLO).await.map_err(|_| Error::Rejected)?;
 
         let mut greeting = [0u8; HELLO.len()];
@@ -220,11 +220,58 @@ impl Connection {
         Ok(())
     }
 
-    /// Opens a bidirectional stream, dispatching on role so both sides pair up.
-    pub async fn open_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream), Error> {
+    /// Opens a channel to the peer, declaring what it carries. Either side may
+    /// do this at any time — that is the point of the header.
+    pub async fn open(
+        &self,
+        header: StreamHeader,
+    ) -> Result<(quinn::SendStream, quinn::RecvStream), Error> {
+        let (mut send, recv) = self
+            .inner
+            .open_bi()
+            .await
+            .map_err(|e| Error::Stream(format!("opening a channel: {e}")))?;
+        let _ = send.set_priority(header.kind.priority());
+        send.write_all(&header.encode())
+            .await
+            .map_err(|e| Error::Stream(format!("writing a stream header: {e}")))?;
+        Ok((send, recv))
+    }
+
+    /// Waits for the peer to open a channel and reads what it declared.
+    pub async fn accept_stream(
+        &self,
+    ) -> Result<(StreamHeader, quinn::SendStream, quinn::RecvStream), Error> {
+        let (send, mut recv) = self
+            .inner
+            .accept_bi()
+            .await
+            .map_err(|e| Error::Stream(format!("accepting a channel: {e}")))?;
+        let mut bytes = [0u8; HEADER_LEN];
+        recv.read_exact(&mut bytes)
+            .await
+            .map_err(|e| Error::Stream(format!("reading a stream header: {e}")))?;
+        let header = StreamHeader::decode(&bytes)?;
+        let _ = send.set_priority(header.kind.priority());
+        Ok((header, send, recv))
+    }
+
+    /// One control channel for a symmetric two-party exchange on a fresh
+    /// connection, where there is no dispatcher yet: the dialer opens, the
+    /// listener accepts. Used by the handshake and by pairing.
+    pub async fn control_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream), Error> {
         match self.role {
-            Role::Dialer => self.inner.open_bi().await.map_err(|_| Error::Rejected),
-            Role::Listener => self.inner.accept_bi().await.map_err(|_| Error::Rejected),
+            Role::Dialer => self.open(StreamHeader::control()).await,
+            Role::Listener => {
+                let (header, send, recv) = self.accept_stream().await?;
+                if header.kind != StreamKind::Control {
+                    return Err(Error::StreamHeader(format!(
+                        "expected a control stream, got {:?}",
+                        header.kind
+                    )));
+                }
+                Ok((send, recv))
+            }
         }
     }
 

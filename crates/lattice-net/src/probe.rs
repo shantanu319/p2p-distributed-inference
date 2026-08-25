@@ -7,6 +7,7 @@
 
 use std::time::{Duration, Instant};
 
+use crate::stream::{NO_SESSION, StreamHeader, StreamKind};
 use crate::transport::Connection;
 use crate::Error;
 
@@ -48,7 +49,9 @@ pub async fn measure(conn: &Connection, probe_bytes: usize) -> Result<LinkQualit
 }
 
 async fn measure_rtt(conn: &Connection) -> Result<Duration, Error> {
-    let (mut send, mut recv) = conn.inner.open_bi().await.map_err(|_| Error::Rejected)?;
+    // Priced as an activation, because what it measures is what activations
+    // will experience once the link is busy.
+    let (mut send, mut recv) = conn.open(probe_stream(StreamKind::Activation)).await?;
     let mut best = Duration::MAX;
     let mut byte = [0u8; 1];
     for _ in 0..RTT_SAMPLES {
@@ -61,10 +64,9 @@ async fn measure_rtt(conn: &Connection) -> Result<Duration, Error> {
 }
 
 async fn measure_throughput(conn: &Connection, probe_bytes: usize) -> Result<f64, Error> {
-    let (mut send, mut recv) = conn.inner.open_bi().await.map_err(|_| Error::Rejected)?;
     // Bulk: a probe must not delay activations, for the same reason a model
     // transfer must not (§8).
-    let _ = send.set_priority(crate::transport::PRIORITY_BULK);
+    let (mut send, mut recv) = conn.open(probe_stream(StreamKind::Bulk)).await?;
     let payload = vec![0u8; probe_bytes];
 
     let started = Instant::now();
@@ -86,9 +88,17 @@ async fn measure_throughput(conn: &Connection, probe_bytes: usize) -> Result<f64
     Ok(probe_bytes as f64 / elapsed.as_secs_f64())
 }
 
+fn probe_stream(kind: StreamKind) -> StreamHeader {
+    StreamHeader {
+        kind,
+        session: NO_SESSION,
+        generation: 0,
+    }
+}
+
 /// Answers probes until the connection closes. Run this for every peer.
 pub async fn serve(conn: &Connection) -> Result<(), Error> {
-    while let Ok((send, recv)) = conn.inner.accept_bi().await {
+    while let Ok((_, send, recv)) = conn.accept_stream().await {
         tokio::spawn(serve_stream(send, recv));
     }
     Ok(())

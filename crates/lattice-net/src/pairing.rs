@@ -200,7 +200,7 @@ pub async fn exchange(
     name: String,
     platform: String,
 ) -> Result<PairedPeer, Error> {
-    let (mut send, mut recv) = conn.open_stream().await?;
+    let (mut send, mut recv) = conn.control_stream().await?;
     let (state, our_message) = Pairing::start(code, conn.channel_binding());
 
     write_frame(&mut send, &our_message).await?;

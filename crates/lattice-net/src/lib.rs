@@ -52,6 +52,8 @@ pub enum Error {
     Rejected,
     #[error("link probe failed: {0}")]
     Probe(String),
+    #[error("{0}")]
+    Stream(String),
     #[error("stream header: {0}")]
     StreamHeader(String),
     #[error("no OS data directory available")]
