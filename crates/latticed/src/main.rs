@@ -4,16 +4,17 @@
 //! link. Nothing here loads a model.
 
 mod host;
+mod provision;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use lattice_net::discovery::{Advertisement, Discovery, PeerEvent};
 use lattice_net::identity::default_data_dir;
 use lattice_net::{
-    AcceptAnyPeer, DeviceId, DeviceKey, Endpoint, PairingCode, RefuseControl, TrustStore,
-    TrustedPeers, dispatch, pairing, probe,
+    AcceptAnyPeer, DeviceId, DeviceKey, Endpoint, Mesh, PairedPeer, PairingCode, Request, Response,
+    TrustStore, TrustedPeers, control, dispatch, pairing, probe,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -52,6 +53,8 @@ enum Command {
     },
     /// List paired devices.
     Peers,
+    /// Introduce every paired device to the others, so they can talk directly.
+    Provision,
     /// Forget a paired device.
     Unpair { device: DeviceId },
     /// Advertise on the LAN and serve paired peers.
@@ -91,13 +94,20 @@ async fn main() -> Result<()> {
             let store = TrustStore::load(&dir)?;
             let mut any = false;
             for peer in store.peers() {
-                println!("{}  {}  {}", peer.device_id, peer.name, peer.platform);
+                println!(
+                    "{}  {}  {}  ({})",
+                    peer.device_id,
+                    peer.name,
+                    peer.platform,
+                    peer.origin()
+                );
                 any = true;
             }
             if !any {
                 println!("no paired devices — run `latticed host` on one machine");
             }
         }
+        Command::Provision => provision_mesh(&dir, &key).await?,
         Command::Unpair { device } => {
             let mut store = TrustStore::load(&dir)?;
             if store.remove(device)? {
@@ -213,8 +223,9 @@ async fn pair(
 
 async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, port: u16) -> Result<()> {
     let store = Arc::new(RwLock::new(TrustStore::load(dir)?));
-    let endpoint = Endpoint::bind(bind_addr(port), key, Arc::new(TrustedPeers(store)))?;
+    let endpoint = Endpoint::bind(bind_addr(port), key, Arc::new(TrustedPeers(store.clone())))?;
     let local = endpoint.local_addr()?;
+    let handler = Arc::new(provision::Provisioner::new(store, key.id(), facts));
 
     let mut discovery = Discovery::new()?;
     discovery.advertise(&Advertisement {
@@ -231,8 +242,9 @@ async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, 
             Ok(conn) => {
                 println!("peer {} connected from {}", conn.peer_id(), conn.remote_address());
                 let conn = Arc::new(conn);
+                let handler = handler.clone();
                 tokio::spawn(async move {
-                    let _ = dispatch::serve(conn, Arc::new(RefuseControl)).await;
+                    let _ = dispatch::serve(conn, handler).await;
                 });
             }
             // An unpaired device reaching us is expected on a shared network.
@@ -256,6 +268,73 @@ async fn probe_peer(dir: &std::path::Path, key: &DeviceKey, target: &str, bytes:
         link.decode_hop(8192).as_secs_f64() * 1e3
     );
     Ok(())
+}
+
+/// Hands every paired device the keys of the others. Run on the device the
+/// user paired everything to.
+async fn provision_mesh(dir: &std::path::Path, key: &DeviceKey) -> Result<()> {
+    let store = TrustStore::load(dir)?;
+    let peers: Vec<PairedPeer> = store.peers().cloned().collect();
+    if peers.len() < 2 {
+        bail!(
+            "provisioning needs at least two paired devices, this one has {} — \
+             pair the others to this device first",
+            peers.len()
+        );
+    }
+
+    let wanted: Vec<DeviceId> = peers.iter().map(|p| p.device_id).collect();
+    let located = locate(&wanted)?;
+
+    let shared = Arc::new(RwLock::new(store));
+    let endpoint = Endpoint::bind(bind_addr(0), key, Arc::new(TrustedPeers(shared)))?;
+    let mesh = Mesh::new(endpoint, key.id());
+
+    for peer in &peers {
+        let Some(addrs) = located.get(&peer.device_id) else {
+            println!("{}: not on the network, skipped", peer.name);
+            continue;
+        };
+        let conn = mesh.connect(peer.device_id, addrs).await?;
+        let roster = provision::roster_for(peer.device_id, &peers);
+        let introduced = roster.len();
+        match control::request(&conn, &Request::Provision(roster)).await? {
+            Response::Provisioned {
+                added,
+                already_known,
+            } => println!(
+                "{}: {added} of {introduced} introductions new, {already_known} already known",
+                peer.name
+            ),
+            Response::Refused(why) => println!("{}: refused — {why}", peer.name),
+            other => println!("{}: unexpected reply {other:?}", peer.name),
+        }
+    }
+    Ok(())
+}
+
+/// One mDNS browse for several devices at once, rather than one per device.
+fn locate(wanted: &[DeviceId]) -> Result<HashMap<DeviceId, Vec<SocketAddr>>> {
+    let discovery = Discovery::new()?;
+    let browser = discovery.browse()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(6);
+    let mut found = HashMap::new();
+
+    while found.len() < wanted.len() {
+        let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+            break;
+        };
+        match browser.next_event(remaining) {
+            Some(PeerEvent::Found(peer)) if wanted.contains(&peer.device_id) => {
+                let mut addrs = peer.addrs;
+                addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback()));
+                found.insert(peer.device_id, addrs);
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    Ok(found)
 }
 
 /// Accepts either a `host:port` or a device id to look up over mDNS.
