@@ -23,9 +23,15 @@ pub struct PairedPeer {
     pub platform: String,
     /// Unix seconds, for display in the Devices screen.
     pub paired_at: u64,
+    /// Which device vouched for this one, if the user did not pair with it
+    /// directly. Recorded so the Devices screen can show how each peer came to
+    /// be trusted, and so the file remains auditable by hand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub introduced_by: Option<DeviceId>,
 }
 
 impl PairedPeer {
+    /// Paired directly by the user, over a code.
     pub fn new(public_key: VerifyingKey, name: String, platform: String) -> Self {
         Self {
             device_id: DeviceId::from_public_key(&public_key),
@@ -35,6 +41,28 @@ impl PairedPeer {
             paired_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            introduced_by: None,
+        }
+    }
+
+    /// Vouched for by a device the user already paired with.
+    pub fn introduced(
+        public_key: VerifyingKey,
+        name: String,
+        platform: String,
+        by: DeviceId,
+    ) -> Self {
+        Self {
+            introduced_by: Some(by),
+            ..Self::new(public_key, name, platform)
+        }
+    }
+
+    /// How the user should be told this device came to be trusted.
+    pub fn origin(&self) -> String {
+        match self.introduced_by {
+            Some(by) => format!("introduced by {by}"),
+            None => "paired directly".into(),
         }
     }
 }
@@ -165,6 +193,45 @@ mod tests {
         assert!(!store.is_trusted(&added.public_key));
         assert!(!store.remove(added.device_id).unwrap());
         assert!(!TrustStore::load(store_dir.path()).unwrap().is_trusted(&added.public_key));
+    }
+
+    #[test]
+    fn an_introduction_records_who_vouched() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let peer_dir = tempfile::tempdir().unwrap();
+        let voucher_dir = tempfile::tempdir().unwrap();
+        let voucher = DeviceKey::load_or_create(voucher_dir.path()).unwrap();
+        let key = DeviceKey::load_or_create(peer_dir.path()).unwrap();
+
+        let introduced = PairedPeer::introduced(
+            key.public_key(),
+            "gpu-box".into(),
+            "linux-x86_64".into(),
+            voucher.id(),
+        );
+        assert_eq!(introduced.introduced_by, Some(voucher.id()));
+        assert!(introduced.origin().contains(&voucher.id().to_string()));
+
+        let mut store = TrustStore::load(store_dir.path()).unwrap();
+        store.insert(introduced.clone()).unwrap();
+        let reloaded = TrustStore::load(store_dir.path()).unwrap();
+        assert_eq!(reloaded.get(introduced.device_id), Some(&introduced));
+    }
+
+    #[test]
+    fn a_directly_paired_peer_says_so_and_stays_compact() {
+        let store_dir = tempfile::tempdir().unwrap();
+        let peer_dir = tempfile::tempdir().unwrap();
+        let direct = peer(peer_dir.path(), "laptop");
+        assert_eq!(direct.origin(), "paired directly");
+
+        let mut store = TrustStore::load(store_dir.path()).unwrap();
+        store.insert(direct).unwrap();
+        let text = std::fs::read_to_string(store_dir.path().join(TRUST_FILE)).unwrap();
+        assert!(
+            !text.contains("introduced_by"),
+            "a directly paired peer should not carry an empty field: {text}"
+        );
     }
 
     #[test]
