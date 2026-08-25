@@ -13,6 +13,7 @@ use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::tls::{DeviceCertificate, channel_binding, peer_key};
 use crate::{DeviceKey, Error};
@@ -21,6 +22,48 @@ pub const ALPN: &[u8] = b"lattice/1";
 
 /// Opening bytes of the control stream, exchanged in both directions.
 const HELLO: [u8; 4] = *b"LTC1";
+
+/// Stream priorities. Activation sits at quinn's default, so a stream nobody
+/// classified behaves as the hot path rather than silently outranking it.
+/// Control outranks it because generation bumps and drain notices decide how
+/// fast a master can re-plan, and they are a few bytes each.
+pub const PRIORITY_CONTROL: i32 = 1;
+pub const PRIORITY_ACTIVATION: i32 = 0;
+pub const PRIORITY_BULK: i32 = -1;
+
+/// Sized to the worst link we intend to work on: gigabit ethernet (§8) at the
+/// 50 ms RTT §12 warns a congested 2.4 GHz link can reach. Sustaining a rate
+/// needs a window of at least bandwidth x RTT, and quinn's 1.25 MB default
+/// would cap that path at ~25 MB/s — the transport bottlenecking below the
+/// link, which we would misread as the network being slow.
+const STREAM_RECEIVE_WINDOW: u32 = 8 << 20;
+
+/// Caps memory per peer. Streams share it, so this is the real ceiling on how
+/// much unacknowledged data one peer can make us buffer.
+const CONNECTION_WINDOW: u32 = 32 << 20;
+
+/// Idle connections are the norm between requests, and quinn ships no
+/// keepalive against a 30 s idle timeout, so a warm mesh connection would die
+/// half a minute after the last token and pay a full handshake on the next.
+const KEEP_ALIVE: Duration = Duration::from_secs(10);
+const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+// These relationships are the whole point of the constants above, so they are
+// checked at compile time rather than left to a test someone might delete.
+const _: () = assert!(
+    KEEP_ALIVE.as_secs() * 2 < IDLE_TIMEOUT.as_secs(),
+    "a single lost keepalive must not close a live connection"
+);
+const _: () = assert!(
+    CONNECTION_WINDOW > STREAM_RECEIVE_WINDOW,
+    "one stream must not be able to exhaust the connection window"
+);
+const _: () = assert!(PRIORITY_CONTROL > PRIORITY_ACTIVATION);
+const _: () = assert!(PRIORITY_ACTIVATION > PRIORITY_BULK);
+const _: () = assert!(
+    PRIORITY_ACTIVATION == 0,
+    "activation must sit at quinn's default so unclassified streams match it"
+);
 
 /// Decides whether a presented device key may connect. Pairing uses
 /// [`AcceptAnyPeer`]; everything else consults the trust store.
@@ -76,12 +119,18 @@ impl Endpoint {
             .map_err(tls_err)?;
         client.alpn_protocols = vec![ALPN.to_vec()];
 
-        let server_config =
+        let transport = Arc::new(transport_config()?);
+        let mut server_config =
             quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server).map_err(|e| Error::Tls(e.to_string()))?));
-        let mut endpoint = quinn::Endpoint::server(server_config, addr)?;
-        endpoint.set_default_client_config(quinn::ClientConfig::new(Arc::new(
+        server_config.transport_config(transport.clone());
+
+        let mut client_config = quinn::ClientConfig::new(Arc::new(
             QuicClientConfig::try_from(client).map_err(|e| Error::Tls(e.to_string()))?,
-        )));
+        ));
+        client_config.transport_config(transport);
+
+        let mut endpoint = quinn::Endpoint::server(server_config, addr)?;
+        endpoint.set_default_client_config(client_config);
 
         Ok(Self {
             endpoint,
@@ -158,6 +207,7 @@ impl Connection {
     /// failure on first use.
     async fn confirm(&self) -> Result<(), Error> {
         let (mut send, mut recv) = self.open_stream().await?;
+        let _ = send.set_priority(PRIORITY_CONTROL);
         send.write_all(&HELLO).await.map_err(|_| Error::Rejected)?;
 
         let mut greeting = [0u8; HELLO.len()];
@@ -312,6 +362,43 @@ impl ClientCertVerifier for DeviceKeyVerifier {
     }
 }
 
+fn transport_config() -> Result<quinn::TransportConfig, Error> {
+    let mut config = quinn::TransportConfig::default();
+    config
+        .stream_receive_window(STREAM_RECEIVE_WINDOW.into())
+        .receive_window(CONNECTION_WINDOW.into())
+        .send_window(u64::from(CONNECTION_WINDOW))
+        .keep_alive_interval(Some(KEEP_ALIVE))
+        .max_idle_timeout(Some(
+            IDLE_TIMEOUT
+                .try_into()
+                .map_err(|_| Error::Tls("idle timeout out of range".into()))?,
+        ));
+    Ok(config)
+}
+
 fn tls_err(e: rustls::Error) -> Error {
     Error::Tls(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Locks the reasoning behind the window size. A silent regression here
+    /// looks like "the network got slow" rather than a config change.
+    #[test]
+    fn the_stream_window_covers_the_worst_link_we_target() {
+        // Gigabit ethernet (§8) at the 50 ms RTT §12 warns of: bandwidth x RTT.
+        let bandwidth_delay_product = 125.0e6 * 0.050;
+        assert!(
+            f64::from(STREAM_RECEIVE_WINDOW) >= bandwidth_delay_product,
+            "{STREAM_RECEIVE_WINDOW} bytes caps this link below its capacity"
+        );
+    }
+
+    #[test]
+    fn the_transport_config_builds() {
+        transport_config().unwrap();
+    }
 }

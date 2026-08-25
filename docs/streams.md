@@ -152,8 +152,13 @@ hurts.
 
 **`send_fairness` is `true`.** By default a 40 GB model transfer gets an equal
 share against a 16 KB activation frame. Peer-to-peer model sync (§8) would
-wreck inference latency while it ran. Streams need explicit priority:
-activation above control above bulk.
+wreck inference latency while it ran. Streams need explicit priority.
+
+Ordering: **control above activation above bulk.** Control messages are tiny
+and rare, so putting them first costs activations almost nothing, and they
+carry generation bumps and drain notices whose timeliness decides how fast §9
+re-plans. Activation sits at quinn's default priority, so any stream we forget
+to classify behaves as the hot path rather than silently outranking it.
 
 **`max_concurrent_bidi_streams` is 100.** A ceiling on
 concurrent sessions × boundaries, which matters once M4 adds microbatching.
@@ -174,26 +179,50 @@ Two failures that must not be conflated:
 
 ---
 
-## 7. The open question this forces: who may talk to whom
+## 7. Who may talk to whom — decided
 
-A mesh means every adjacent pair needs mutual trust, and trust today is
-strictly pairwise — pinned Ed25519 keys from a SPAKE2 exchange. With 4 devices
-a full mesh is 6 pairings, so the user types six codes.
+A mesh means every adjacent pair needs mutual trust, and trust is pairwise
+pinned Ed25519 keys. Making the user type `n(n-1)/2` codes is unacceptable at
+four devices.
 
-Two ways out, and this is a real decision, not a detail:
+**Decision: the master provisions the relationships, as a courier rather than
+an authority.**
 
-- **Pairwise.** Every pair pairs. Trust stays exactly as strong as it is now:
-  compromising one device gives an attacker only that device's peers. Cost is
-  `n(n-1)/2` code exchanges, one time — 1 for two devices, 3 for three, 6 for
-  four.
-- **Cluster roster.** Devices pair once into a cluster and vouch for each
-  other; a device trusts keys signed into the roster by a device it already
-  trusts. One pairing per new device. Cost: trust becomes transitive, so
-  compromising one device admits the attacker to all of them, and it needs a
-  stable signing identity — which the current "master is whoever received the
-  request" model deliberately does not have.
+The user links each device to the master once, typing one code per device. That
+act is the user confirming the device. The master then hands each follower the
+others' public keys over the already-authenticated control channel, and each
+follower pins them exactly as if it had paired directly.
 
-§2 says peers are your own machines and trusted once paired, which argues for
-the roster. §7 says coffee-shop Wi-Fi is a hostile LAN, which argues for
-pairwise. They are in tension and the answer should be chosen, not defaulted
-into.
+```
+1. user pairs each device to the master        (one code per device)
+2. master sends A the keys for B and C
+   master sends B the keys for A and C   ...   (over the control stream)
+3. every device pins every other device
+4. connections between followers are ordinary pinned mTLS
+```
+
+What makes this cheap rather than a new trust model: **after step 3 there is no
+ongoing authority.** No roster is signed, no signature is checked at connection
+time, and no device needs to consult the master to accept a peer. The end state
+is byte-for-byte the trust store we already have — the master only saved the
+user from typing the codes.
+
+That also sidesteps a problem the alternatives had. §3 makes the master
+whichever device received the request, so there is no stable identity to act as
+a CA. A courier does not need to be stable; it only has to be trusted at the
+moment it delivers.
+
+**The residual risk, stated plainly.** A compromised master can inject a device
+of its choosing into the mesh at provisioning time. This is strictly better
+than a signed roster, where any compromised member can do so at any time, and
+strictly worse than pairwise pairing, where nobody can. It is bounded to
+provisioning: a master compromised after the fact cannot add anyone, because
+nothing re-consults it.
+
+Two things this obliges us to get right:
+
+- Provisioning must run over an authenticated control stream, never over the
+  pairing endpoint's `AcceptAnyPeer` path.
+- The Devices screen (§4.3) must show *how* each peer came to be trusted —
+  paired directly, or introduced by which device — so the user can audit it.
+  The trusted-devices file is already human-readable; this is one more field.

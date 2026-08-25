@@ -47,6 +47,11 @@ latticed probe <device-id> --mib 32
 `probe` reports RTT, throughput, and the derived per-boundary decode cost from
 §1. Run it on Wi-Fi and again on ethernet.
 
+**Take several samples and use a release build.** On loopback, a debug build
+measured 35-68 MB/s where release measured 135-166 MB/s, and release runs still
+varied ~23% between consecutive samples. A single number means nothing; run
+`probe` at least five times per link and record the spread, not just the best.
+
 ## What the numbers mean
 
 §1 assumes 3–5 ms per boundary crossing per token on a decent 5 GHz link, and
@@ -66,6 +71,18 @@ Record, for both Wi-Fi and ethernet:
 
 Compare ethernet against Wi-Fi before concluding anything about the design.
 "Plug in a cable" is legitimate advice the product should be willing to give.
+
+## What loopback could not tell us
+
+The transport is tuned for a link with real latency: the stream receive window
+is sized for gigabit at 50 ms RTT, because quinn's 1.25 MB default would cap
+that path at ~25 MB/s. Loopback RTT on the development machine is 0.05 ms,
+where even the stock window supports tens of GB/s.
+
+So the window tuning is **unverified** — not because it is wrong, but because a
+single host cannot exercise it. Your Wi-Fi link is the first place it can be.
+If throughput on Wi-Fi lands far below what `iperf3` reports for the same path,
+the window is the first thing to suspect.
 
 ## Known limits of this harness
 

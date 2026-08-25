@@ -62,6 +62,9 @@ async fn measure_rtt(conn: &Connection) -> Result<Duration, Error> {
 
 async fn measure_throughput(conn: &Connection, probe_bytes: usize) -> Result<f64, Error> {
     let (mut send, mut recv) = conn.inner.open_bi().await.map_err(|_| Error::Rejected)?;
+    // Bulk: a probe must not delay activations, for the same reason a model
+    // transfer must not (§8).
+    let _ = send.set_priority(crate::transport::PRIORITY_BULK);
     let payload = vec![0u8; probe_bytes];
 
     let started = Instant::now();
