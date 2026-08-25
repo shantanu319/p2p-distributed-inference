@@ -4,11 +4,13 @@ pub mod discovery;
 pub mod identity;
 pub mod pairing;
 pub mod tls;
+pub mod transport;
 pub mod trust;
 
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
 pub use identity::{DeviceId, DeviceKey};
 pub use pairing::{Pairing, PairingCode};
+pub use transport::{Connection, Endpoint, PeerPolicy};
 pub use trust::{PairedPeer, TrustStore};
 
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +37,14 @@ pub enum Error {
     Certificate(String),
     #[error("rcgen: {0}")]
     Rcgen(#[from] rcgen::Error),
+    #[error("tls: {0}")]
+    Tls(String),
+    #[error("quic connect: {0}")]
+    Connect(#[from] quinn::ConnectError),
+    #[error("quic connection: {0}")]
+    Connection(#[from] quinn::ConnectionError),
+    #[error("peer refused the connection: it has not paired with this device")]
+    Rejected,
     #[error("no OS data directory available")]
     NoDataDir,
 }
