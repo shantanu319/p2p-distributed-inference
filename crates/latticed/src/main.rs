@@ -7,11 +7,16 @@ mod host;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
-use lattice_net::discovery::{Discovery, PeerEvent};
+use lattice_net::discovery::{Advertisement, Discovery, PeerEvent};
 use lattice_net::identity::default_data_dir;
-use lattice_net::{DeviceId, DeviceKey, TrustStore};
+use lattice_net::{
+    AcceptAnyPeer, DeviceId, DeviceKey, Endpoint, PairingCode, TrustStore, TrustedPeers, pairing,
+    probe,
+};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 #[derive(Parser)]
@@ -33,10 +38,33 @@ enum Command {
         #[arg(long, default_value_t = 5)]
         seconds: u64,
     },
+    /// Wait for another device to pair with this one, showing a code.
+    Host {
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
+    /// Pair with a device that is showing a code.
+    Pair {
+        /// A `host:port`, or the device id of something `discover` found.
+        target: String,
+        #[arg(long)]
+        code: String,
+    },
     /// List paired devices.
     Peers,
     /// Forget a paired device.
     Unpair { device: DeviceId },
+    /// Advertise on the LAN and serve paired peers.
+    Serve {
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+    },
+    /// Measure the link to a paired device.
+    Probe {
+        target: String,
+        #[arg(long, default_value_t = 8)]
+        mib: usize,
+    },
 }
 
 #[tokio::main]
@@ -55,6 +83,10 @@ async fn main() -> Result<()> {
             println!("{:.1} GB memory", facts.total_memory as f64 / 1e9);
         }
         Command::Discover { seconds } => discover(Duration::from_secs(seconds), key.id())?,
+        Command::Host { port } => host_pairing(&dir, &key, &facts, port).await?,
+        Command::Pair { target, code } => {
+            pair(&dir, &key, &facts, &target, &code).await?;
+        }
         Command::Peers => {
             let store = TrustStore::load(&dir)?;
             let mut any = false;
@@ -74,6 +106,8 @@ async fn main() -> Result<()> {
                 bail!("{device} was not paired");
             }
         }
+        Command::Serve { port } => serve(&dir, &key, &facts, port).await?,
+        Command::Probe { target, mib } => probe_peer(&dir, &key, &target, mib << 20).await?,
     }
     Ok(())
 }
@@ -110,4 +144,188 @@ fn discover(window: Duration, self_id: DeviceId) -> Result<()> {
         );
     }
     Ok(())
+}
+
+async fn host_pairing(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, port: u16) -> Result<()> {
+    let code = PairingCode::generate();
+    let endpoint = Endpoint::bind(bind_addr(port), key, Arc::new(AcceptAnyPeer))?;
+    let local = endpoint.local_addr()?;
+
+    // Advertise so the other side can pair by device id rather than address.
+    let mut discovery = Discovery::new()?;
+    discovery.advertise(&Advertisement {
+        device_id: key.id(),
+        name: facts.name.clone(),
+        platform: facts.platform.clone(),
+        total_memory: facts.total_memory,
+        port: local.port(),
+    })?;
+
+    println!("pairing code: {code}");
+    println!("on the other device, run:");
+    println!("    latticed pair {} --code {code}", key.id());
+    println!("(listening on port {})", local.port());
+
+    let conn = endpoint
+        .accept()
+        .await
+        .context("endpoint closed before anyone connected")??;
+    let peer = pairing::exchange(
+        &conn,
+        &code,
+        key,
+        facts.name.clone(),
+        facts.platform.clone(),
+    )
+    .await
+    .context("pairing failed — wrong code, or someone is between the two devices")?;
+
+    TrustStore::load(dir)?.insert(peer.clone())?;
+    println!("paired with {} ({})", peer.name, peer.device_id);
+    Ok(())
+}
+
+async fn pair(
+    dir: &std::path::Path,
+    key: &DeviceKey,
+    facts: &host::HostFacts,
+    target: &str,
+    code: &str,
+) -> Result<()> {
+    let code = PairingCode::parse(code)?;
+    let addrs = resolve(target, key.id())?;
+    let (_endpoint, conn) = connect_any(key, Arc::new(AcceptAnyPeer), &addrs).await?;
+
+    let peer = pairing::exchange(
+        &conn,
+        &code,
+        key,
+        facts.name.clone(),
+        facts.platform.clone(),
+    )
+    .await
+    .context("pairing failed — wrong code, or someone is between the two devices")?;
+
+    TrustStore::load(dir)?.insert(peer.clone())?;
+    println!("paired with {} ({})", peer.name, peer.device_id);
+    Ok(())
+}
+
+async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, port: u16) -> Result<()> {
+    let store = Arc::new(RwLock::new(TrustStore::load(dir)?));
+    let endpoint = Endpoint::bind(bind_addr(port), key, Arc::new(TrustedPeers(store)))?;
+    let local = endpoint.local_addr()?;
+
+    let mut discovery = Discovery::new()?;
+    discovery.advertise(&Advertisement {
+        device_id: key.id(),
+        name: facts.name.clone(),
+        platform: facts.platform.clone(),
+        total_memory: facts.total_memory,
+        port: local.port(),
+    })?;
+
+    println!("{} serving as {} on port {}", facts.name, key.id(), local.port());
+    while let Some(incoming) = endpoint.accept().await {
+        match incoming {
+            Ok(conn) => {
+                println!("peer {} connected from {}", conn.peer_id(), conn.remote_address());
+                tokio::spawn(async move {
+                    let _ = probe::serve(&conn).await;
+                });
+            }
+            // An unpaired device reaching us is expected on a shared network.
+            Err(e) => println!("refused a connection: {e}"),
+        }
+    }
+    Ok(())
+}
+
+async fn probe_peer(dir: &std::path::Path, key: &DeviceKey, target: &str, bytes: usize) -> Result<()> {
+    let store = Arc::new(RwLock::new(TrustStore::load(dir)?));
+    let addrs = resolve(target, key.id())?;
+    let (_endpoint, conn) = connect_any(key, Arc::new(TrustedPeers(store)), &addrs).await?;
+
+    let link = probe::measure(&conn, bytes).await?;
+    println!("peer      {}", conn.peer_id());
+    println!("rtt       {:.2} ms", link.rtt.as_secs_f64() * 1e3);
+    println!("bandwidth {:.1} MB/s", link.throughput_bytes_per_sec / 1e6);
+    println!(
+        "decode hop {:.2} ms per boundary at hidden_dim 8192",
+        link.decode_hop(8192).as_secs_f64() * 1e3
+    );
+    Ok(())
+}
+
+/// Accepts either a `host:port` or a device id to look up over mDNS.
+///
+/// A device advertises every address it is reachable on, so this returns all
+/// of them; picking one up front is how a peer that is perfectly reachable on
+/// its LAN address ends up unreachable because it also published a loopback.
+fn resolve(target: &str, self_id: DeviceId) -> Result<Vec<SocketAddr>> {
+    if let Ok(addr) = target.parse::<SocketAddr>() {
+        return Ok(vec![addr]);
+    }
+    let wanted: DeviceId = target
+        .parse()
+        .context("target must be a host:port or a device id")?;
+
+    let discovery = Discovery::new()?;
+    let browser = discovery.browse()?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match browser.next_event(remaining) {
+            Some(PeerEvent::Found(peer)) if peer.device_id == wanted => {
+                let mut addrs = peer.addrs;
+                if addrs.is_empty() {
+                    bail!("{wanted} advertised no address");
+                }
+                // A routable address first, then loopback; IPv4 before IPv6,
+                // since the endpoint binds IPv4.
+                addrs.sort_by_key(|a| (a.is_ipv6(), a.ip().is_loopback()));
+                return Ok(addrs);
+            }
+            Some(_) => {}
+            None => break,
+        }
+    }
+    if wanted == self_id {
+        bail!("{wanted} is this device");
+    }
+    bail!("could not find {wanted} on the network — pass a host:port instead")
+}
+
+/// Tries each advertised address in turn. A peer commonly publishes addresses
+/// on interfaces that cannot reach us, so the first is not necessarily good.
+///
+/// The local endpoint is bound per attempt to match the target's address
+/// family: a UDP socket bound to IPv4 cannot send to an IPv6 peer.
+async fn connect_any(
+    key: &DeviceKey,
+    policy: Arc<dyn lattice_net::PeerPolicy>,
+    addrs: &[SocketAddr],
+) -> Result<(Endpoint, lattice_net::Connection)> {
+    let mut last = None;
+    for addr in addrs {
+        let endpoint = Endpoint::bind(ephemeral_like(*addr), key, policy.clone())?;
+        match endpoint.connect(*addr).await {
+            Ok(conn) => return Ok((endpoint, conn)),
+            Err(e) => last = Some((addr, e)),
+        }
+    }
+    match last {
+        Some((addr, e)) => Err(e).with_context(|| format!("could not reach {addr}")),
+        None => bail!("no addresses to try"),
+    }
+}
+
+fn ephemeral_like(target: SocketAddr) -> SocketAddr {
+    match target {
+        SocketAddr::V4(_) => SocketAddr::from(([0, 0, 0, 0], 0)),
+        SocketAddr::V6(_) => SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, 0)),
+    }
+}
+
+fn bind_addr(port: u16) -> SocketAddr {
+    SocketAddr::from(([0, 0, 0, 0], port))
 }
