@@ -143,7 +143,12 @@ fn discover(window: Duration, self_id: DeviceId) -> Result<()> {
         println!("no devices found — is `latticed serve` running elsewhere?");
     }
     for peer in seen.values() {
-        let addr = peer.addrs.first().map_or_else(String::new, |a| a.to_string());
+        // Show the address a dial would use, not whatever the peer listed
+        // first — a device advertises link-local addresses we cannot reach,
+        // and printing one invites the user to paste it into `pair`.
+        let addr = usable(peer.addrs.clone())
+            .first()
+            .map_or_else(|| "no reachable address".to_owned(), |a| a.to_string());
         println!(
             "{}  {}  {}  {:.0} GB  {}",
             peer.device_id,
@@ -325,8 +330,13 @@ fn locate(wanted: &[DeviceId]) -> Result<HashMap<DeviceId, Vec<SocketAddr>>> {
             break;
         };
         match browser.next_event(remaining) {
+            // As in resolve(): ignore a record with nothing dialable in it and
+            // wait for a fuller one.
             Some(PeerEvent::Found(peer)) if wanted.contains(&peer.device_id) => {
-                found.insert(peer.device_id, usable(peer.addrs));
+                let addrs = usable(peer.addrs);
+                if !addrs.is_empty() {
+                    found.insert(peer.device_id, addrs);
+                }
             }
             Some(_) => {}
             None => break,
@@ -351,14 +361,19 @@ fn resolve(target: &str, self_id: DeviceId) -> Result<Vec<SocketAddr>> {
     let discovery = Discovery::new()?;
     let browser = discovery.browse()?;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut seen_but_unreachable = false;
     while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
         match browser.next_event(remaining) {
+            // mDNS resolves a device's addresses incrementally, and the first
+            // record for a peer often carries only its loopback and
+            // link-local ones. Returning on that would report a device we can
+            // see as unreachable, so keep waiting for a record we can use.
             Some(PeerEvent::Found(peer)) if peer.device_id == wanted => {
                 let addrs = usable(peer.addrs);
-                if addrs.is_empty() {
-                    bail!("{wanted} advertised no address this device can reach");
+                if !addrs.is_empty() {
+                    return Ok(addrs);
                 }
-                return Ok(addrs);
+                seen_but_unreachable = true;
             }
             Some(_) => {}
             None => break,
@@ -366,6 +381,12 @@ fn resolve(target: &str, self_id: DeviceId) -> Result<Vec<SocketAddr>> {
     }
     if wanted == self_id {
         bail!("{wanted} is this device");
+    }
+    if seen_but_unreachable {
+        bail!(
+            "{wanted} is on the network but advertised no address this device \
+             can reach — pass a host:port instead"
+        );
     }
     bail!("could not find {wanted} on the network — pass a host:port instead")
 }
