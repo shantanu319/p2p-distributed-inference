@@ -97,16 +97,16 @@ impl Endpoint {
         // The SNI name is unused: the peer is identified by its key, and the
         // verifier ignores names entirely.
         let connecting = self.endpoint.connect(addr, "lattice")?;
-        let conn = self.wrap(connecting.await?)?;
-        conn.confirm(Role::Dialer).await?;
+        let conn = self.wrap(connecting.await?, Role::Dialer)?;
+        conn.confirm().await?;
         Ok(conn)
     }
 
     pub async fn accept(&self) -> Option<Result<Connection, Error>> {
         let incoming = self.endpoint.accept().await?;
         Some(async {
-            let conn = self.wrap(incoming.await?)?;
-            conn.confirm(Role::Listener).await?;
+            let conn = self.wrap(incoming.await?, Role::Listener)?;
+            conn.confirm().await?;
             Ok(conn)
         }
         .await)
@@ -116,7 +116,7 @@ impl Endpoint {
         self.endpoint.wait_idle()
     }
 
-    fn wrap(&self, inner: quinn::Connection) -> Result<Connection, Error> {
+    fn wrap(&self, inner: quinn::Connection, role: Role) -> Result<Connection, Error> {
         let certs = inner
             .peer_identity()
             .and_then(|id| id.downcast::<Vec<CertificateDer<'static>>>().ok())
@@ -129,6 +129,7 @@ impl Endpoint {
             channel_binding: channel_binding(&self.local_cert, end_entity),
             peer_key: peer_key(end_entity)?,
             inner,
+            role,
         })
     }
 }
@@ -138,9 +139,13 @@ pub struct Connection {
     pub inner: quinn::Connection,
     peer_key: VerifyingKey,
     channel_binding: [u8; 32],
+    role: Role,
 }
 
-enum Role {
+/// Which side opened the connection. Stream setup is not symmetric — one
+/// side must open where the other accepts — so the role is remembered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
     Dialer,
     Listener,
 }
@@ -151,11 +156,8 @@ impl Connection {
     /// `connect` succeed. Exchanging bytes over a control stream is what turns
     /// that into an error at the point of connection rather than a puzzling
     /// failure on first use.
-    async fn confirm(&self, role: Role) -> Result<(), Error> {
-        let (mut send, mut recv) = match role {
-            Role::Dialer => self.inner.open_bi().await.map_err(|_| Error::Rejected)?,
-            Role::Listener => self.inner.accept_bi().await.map_err(|_| Error::Rejected)?,
-        };
+    async fn confirm(&self) -> Result<(), Error> {
+        let (mut send, mut recv) = self.open_stream().await?;
         send.write_all(&HELLO).await.map_err(|_| Error::Rejected)?;
 
         let mut greeting = [0u8; HELLO.len()];
@@ -166,6 +168,18 @@ impl Connection {
             return Err(Error::Rejected);
         }
         Ok(())
+    }
+
+    /// Opens a bidirectional stream, dispatching on role so both sides pair up.
+    pub async fn open_stream(&self) -> Result<(quinn::SendStream, quinn::RecvStream), Error> {
+        match self.role {
+            Role::Dialer => self.inner.open_bi().await.map_err(|_| Error::Rejected),
+            Role::Listener => self.inner.accept_bi().await.map_err(|_| Error::Rejected),
+        }
+    }
+
+    pub fn role(&self) -> Role {
+        self.role
     }
 
     pub fn peer_key(&self) -> VerifyingKey {

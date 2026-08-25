@@ -11,9 +11,10 @@ pub mod trust;
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
 pub use identity::{DeviceId, DeviceKey};
 pub use pairing::{Pairing, PairingCode};
+pub use transport::AcceptAnyPeer;
 pub use probe::{LinkQuality, measure};
 pub use transport::{Connection, Endpoint, PeerPolicy};
-pub use trust::{PairedPeer, TrustStore};
+pub use trust::{PairedPeer, TrustStore, TrustedPeers};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

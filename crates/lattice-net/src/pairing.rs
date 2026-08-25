@@ -183,6 +183,59 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> subtle::Choice {
     a.ct_eq(b)
 }
 
+/// Pairing messages are small and fixed-shape; anything larger is a peer
+/// that is confused or hostile.
+const MAX_FRAME: usize = 4096;
+
+/// Runs the whole exchange over an established connection.
+///
+/// The connection is expected to have been made with
+/// [`crate::transport::AcceptAnyPeer`]: TLS cannot authenticate a device that
+/// has never been paired, which is the entire reason SPAKE2 is here. The
+/// resulting peer is what the caller pins in the `TrustStore`.
+pub async fn exchange(
+    conn: &crate::Connection,
+    code: &PairingCode,
+    key: &DeviceKey,
+    name: String,
+    platform: String,
+) -> Result<PairedPeer, Error> {
+    let (mut send, mut recv) = conn.open_stream().await?;
+    let (state, our_message) = Pairing::start(code, conn.channel_binding());
+
+    write_frame(&mut send, &our_message).await?;
+    let peer_message = read_frame(&mut recv).await?;
+
+    let (awaiting, confirm) = state.key_exchange(&peer_message, key, name, platform)?;
+    write_frame(&mut send, &postcard::to_allocvec(&confirm)?).await?;
+
+    let peer_confirm: Confirm = postcard::from_bytes(&read_frame(&mut recv).await?)?;
+    awaiting.finish(&peer_confirm)
+}
+
+async fn write_frame(send: &mut quinn::SendStream, payload: &[u8]) -> Result<(), Error> {
+    send.write_all(&(payload.len() as u32).to_le_bytes())
+        .await
+        .map_err(|_| Error::PairingFailed)?;
+    send.write_all(payload).await.map_err(|_| Error::PairingFailed)
+}
+
+async fn read_frame(recv: &mut quinn::RecvStream) -> Result<Vec<u8>, Error> {
+    let mut header = [0u8; 4];
+    recv.read_exact(&mut header)
+        .await
+        .map_err(|_| Error::PairingFailed)?;
+    let len = u32::from_le_bytes(header) as usize;
+    if len > MAX_FRAME {
+        return Err(Error::PairingFailed);
+    }
+    let mut payload = vec![0u8; len];
+    recv.read_exact(&mut payload)
+        .await
+        .map_err(|_| Error::PairingFailed)?;
+    Ok(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

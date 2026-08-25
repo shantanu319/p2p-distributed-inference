@@ -99,6 +99,16 @@ impl TrustStore {
     }
 }
 
+/// Admits exactly the devices in the store. A poisoned lock fails closed.
+#[derive(Debug, Clone)]
+pub struct TrustedPeers(pub std::sync::Arc<std::sync::RwLock<TrustStore>>);
+
+impl crate::PeerPolicy for TrustedPeers {
+    fn accept(&self, key: &VerifyingKey) -> bool {
+        self.0.read().is_ok_and(|store| store.is_trusted(key))
+    }
+}
+
 mod verifying_key_hex {
     use ed25519_dalek::VerifyingKey;
     use serde::{Deserialize, Deserializer, Serializer, de::Error};
