@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod identity;
 pub mod pairing;
 pub mod probe;
+pub mod stream;
 pub mod tls;
 pub mod transport;
 pub mod trust;
@@ -13,6 +14,7 @@ pub use identity::{DeviceId, DeviceKey};
 pub use pairing::{Pairing, PairingCode};
 pub use transport::AcceptAnyPeer;
 pub use probe::{LinkQuality, measure};
+pub use stream::{StreamHeader, StreamKind};
 pub use transport::{Connection, Endpoint, PeerPolicy};
 pub use trust::{PairedPeer, TrustStore, TrustedPeers};
 
@@ -50,6 +52,8 @@ pub enum Error {
     Rejected,
     #[error("link probe failed: {0}")]
     Probe(String),
+    #[error("stream header: {0}")]
+    StreamHeader(String),
     #[error("no OS data directory available")]
     NoDataDir,
 }
