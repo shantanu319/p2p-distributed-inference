@@ -67,6 +67,46 @@ to f32 on load: 40 MB on disk becomes 262 MB in memory. **The planner must
 charge whoever holds layer 0 for that**, or it will place layers by a number
 that is wrong by a quarter of a gigabyte on a model this small.
 
+## Two processes, one link — 2026-08-26
+
+Same Mac, two `latticed` processes with separate identities, paired over the
+LAN and talking QUIC to each other. Not two machines, but a real socket, real
+serialisation, and two independent Metal contexts. TinyLlama Q4_K_M, 64 tokens.
+
+Link, measured by `latticed probe`: **0.11 ms RTT, 90.5 MB/s**.
+
+| Placement | Decode | Waiting on the peer |
+| --- | --- | --- |
+| all 22 layers in one process | 105.3 tok/s | — |
+| all 22 layers on the peer | 81.9 tok/s | 100% |
+| 0–11 here, 11–22 on the peer | 73.9 tok/s | 26% |
+
+Both remote configurations produce **token-identical output** to the
+single-process reference.
+
+That 26% is §1's model meeting reality for the first time: the prediction was
+a 10–25% tax per boundary and the measurement is 26% on a link with almost no
+latency. It is a floor, not a result — real Wi-Fi adds the RTT this link does
+not have.
+
+### Thread affinity costs more than the network does
+
+The first working version ran at 21.6 tok/s and spent 94% of the run waiting.
+The link was never the problem; `probe` reported 0.11 ms throughout. The cause
+was that candle's Metal backend is roughly three times slower when its work
+migrates between threads, and tokio's worker pool migrates it on nearly every
+step:
+
+| Where the shard runs | Decode |
+| --- | --- |
+| tokio worker pool | 21.6 tok/s |
+| `spawn_blocking` pool | 21.6 tok/s, and 6x worse time-to-first-token |
+| one dedicated thread | 71.0 tok/s |
+
+Worth recording because the obvious instinct — keep compute off the async
+runtime with `spawn_blocking` — makes it worse, and because the symptom looked
+exactly like a slow network.
+
 ### What this does not tell us
 
 - nothing about a model that exceeds one device's memory, which is the product
