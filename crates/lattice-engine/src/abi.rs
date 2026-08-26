@@ -75,6 +75,14 @@ pub enum KvDtype {
     F16,
 }
 
+impl KvDtype {
+    pub fn size(self) -> usize {
+        match self {
+            Self::F16 => 2,
+        }
+    }
+}
+
 /// What to load. `max_context` is the user's configured ceiling, not the
 /// current context: the KV cache is sized from it, and sizing from anything
 /// else is the classic OOM-6000-tokens-in bug (§5).

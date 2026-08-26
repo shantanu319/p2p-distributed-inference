@@ -5,7 +5,11 @@
 //! the engine underneath it stays a contained decision.
 
 mod abi;
+#[cfg(feature = "candle")]
+mod facts;
 
+#[cfg(feature = "candle")]
+pub use facts::ModelFacts;
 pub use abi::{Activation, KvDtype, Payload, Shard, ShardSpec, ShardStats, WireDtype};
 
 #[derive(Debug, thiserror::Error)]
