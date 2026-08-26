@@ -31,6 +31,42 @@ and a prefix match with expected eventual divergence **across** backends. A
 Mac-plus-Linux split will cross backends by construction, so the harness cannot
 demand exact equality there.
 
+## Layer splits — 2026-08-26
+
+Same machine and model, shards chained in one process. No network involved.
+
+| Split | Tokens | Decode |
+| --- | --- | --- |
+| whole model | reference | 105.3 tok/s |
+| at layer 11, f32 wire | identical | 103.0 tok/s |
+| at layer 11, f16 wire | identical | 100.6 tok/s |
+| at 1 / at 21 (the extremes) | identical | ~104 tok/s |
+| at 5, 11, 17 (four shards) | identical | 93.2 tok/s |
+
+`splitting_a_model_does_not_change_what_it_says` cuts at all 21 interior layers
+and asserts token equality for each. Rounding activations to f16 at the
+boundary does not change the token stream on this model — which is evidence
+for §6's fp16 wire dtype, on one model, not a general result.
+
+The tok/s figures are not a cost model. Every shard is on the same GPU, so a
+four-way split loses ~11% to per-shard overhead with no transfer to pay for.
+§1's `Σ transfer` term is still entirely unmeasured.
+
+### Memory, per shard
+
+Weights held resident, TinyLlama Q4_K_M:
+
+| Split | Shard sizes | Total |
+| --- | --- | --- |
+| whole | 0.89 | 0.89 GB |
+| at 11 | 0.55 + 0.34 | 0.89 GB |
+| at 5, 11, 17 | 0.40 + 0.16 + 0.15 + 0.18 | 0.89 GB |
+
+The first shard is the fat one because candle dequantizes the token embedding
+to f32 on load: 40 MB on disk becomes 262 MB in memory. **The planner must
+charge whoever holds layer 0 for that**, or it will place layers by a number
+that is wrong by a quarter of a gigabyte on a model this small.
+
 ### What this does not tell us
 
 - nothing about a model that exceeds one device's memory, which is the product
