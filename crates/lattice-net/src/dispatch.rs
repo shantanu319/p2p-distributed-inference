@@ -5,29 +5,36 @@
 
 use std::sync::Arc;
 
+use crate::activation::{self, Executor};
 use crate::control::{self, ControlHandler, Request, Response};
 use crate::stream::StreamKind;
 use crate::{Connection, DeviceId, Error, probe};
 
 /// Serves a peer until the connection closes. Returns `Ok` on a clean close;
 /// a peer going away is ordinary, not an error.
-pub async fn serve(conn: Arc<Connection>, control: Arc<dyn ControlHandler>) -> Result<(), Error> {
+pub async fn serve(
+    conn: Arc<Connection>,
+    control: Arc<dyn ControlHandler>,
+    executor: Arc<dyn Executor>,
+) -> Result<(), Error> {
     let from = conn.peer_id();
     loop {
         let Ok((header, send, recv)) = conn.accept_stream().await else {
             return Ok(());
         };
         let control = control.clone();
+        let executor = executor.clone();
         tokio::spawn(async move {
             match header.kind {
                 StreamKind::Control => {
                     let _ = control::answer(from, control.as_ref(), send, recv).await;
                 }
-                // Until the engine lands there is nothing to execute, so both
-                // data kinds go to the probe responder.
-                StreamKind::Activation | StreamKind::Bulk => {
-                    probe::serve_stream(send, recv).await;
+                StreamKind::Activation => {
+                    activation::serve_stream(header.session, executor, send, recv).await;
                 }
+                // Model transfer (§8) does not exist yet, so bulk is still the
+                // probe's payload channel and nothing else.
+                StreamKind::Bulk => probe::serve_stream(send, recv).await,
             }
         });
     }

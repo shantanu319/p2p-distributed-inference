@@ -284,7 +284,7 @@ async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, 
                 let conn = Arc::new(conn);
                 let handler = handler.clone();
                 tokio::spawn(async move {
-                    let _ = dispatch::serve(conn, handler).await;
+                    let _ = dispatch::serve(conn, handler, Arc::new(lattice_net::NoShards)).await;
                 });
             }
             // An unpaired device reaching us is expected on a shared network.

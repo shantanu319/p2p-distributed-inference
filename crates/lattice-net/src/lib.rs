@@ -1,5 +1,6 @@
 //! Discovery, pairing, and authenticated transport between Lattice devices.
 
+pub mod activation;
 pub mod codec;
 pub mod control;
 pub mod discovery;
@@ -13,6 +14,7 @@ pub mod tls;
 pub mod transport;
 pub mod trust;
 
+pub use activation::{Executor, NoShards, RemoteShard, Step, StepResult};
 pub use control::{ControlHandler, Introduction, Request, Response};
 pub use dispatch::RefuseControl;
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};

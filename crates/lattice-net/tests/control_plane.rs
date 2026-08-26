@@ -2,7 +2,7 @@
 
 use ed25519_dalek::VerifyingKey;
 use lattice_net::transport::PeerPolicy;
-use lattice_net::{
+use lattice_net::{NoShards, 
     Connection, ControlHandler, DeviceId, DeviceKey, Endpoint, Request, Response, control, dispatch,
 };
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -69,7 +69,7 @@ async fn fixture() -> Fixture {
     let (accepted, dialed) = tokio::join!(a.accept(), b.connect(a_addr));
     let server_conn = Arc::new(accepted.unwrap().unwrap());
     tokio::spawn(async move {
-        let _ = dispatch::serve(server_conn, serving).await;
+        let _ = dispatch::serve(server_conn, serving, Arc::new(NoShards)).await;
     });
 
     Fixture {
