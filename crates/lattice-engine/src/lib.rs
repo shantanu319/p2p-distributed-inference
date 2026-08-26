@@ -10,7 +10,6 @@ mod candle;
 #[cfg(feature = "candle")]
 mod facts;
 #[cfg(feature = "candle")]
-#[allow(dead_code)]
 mod llama;
 
 #[cfg(feature = "candle")]

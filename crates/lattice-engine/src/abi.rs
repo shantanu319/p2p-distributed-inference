@@ -94,6 +94,10 @@ pub struct ShardSpec {
     pub last_layer: u32,
     pub max_context: u32,
     pub kv_dtype: KvDtype,
+    /// What this shard emits at its outgoing boundary. §6 says fp16 in v1;
+    /// fp32 exists so the correctness harness can separate a wrong split from
+    /// a lossy one.
+    pub wire_dtype: WireDtype,
 }
 
 impl ShardSpec {
@@ -144,6 +148,7 @@ mod tests {
             last_layer: 12,
             max_context: 4096,
             kv_dtype: KvDtype::F16,
+            wire_dtype: WireDtype::F16,
         };
         assert_eq!(spec.layers(), 0);
     }

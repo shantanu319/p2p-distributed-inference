@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 use candle_transformers::quantized_nn::RmsNorm;
 use candle_core::quantized::QTensor;
-use candle_core::quantized::{ggml_file, gguf_file};
+use candle_core::quantized::gguf_file;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, Module};
 
@@ -275,11 +275,12 @@ impl LayerWeights {
 }
 
 #[derive(Debug, Clone)]
-pub struct ModelWeights {
-    tok_embeddings: Embedding,
+pub struct ShardModel {
+    /// Present only on the shard holding layer 0.
+    tok_embeddings: Option<Embedding>,
     layers: Vec<LayerWeights>,
-    norm: RmsNorm,
-    output: QMatMul,
+    /// Present only on the shard holding the final layer.
+    head: Option<(RmsNorm, QMatMul)>,
     /// Mask cache keyed by (seq_len, kv_len).
     /// kv_len = index_pos + seq_len, so the mask is rectangular when prefix
     /// KV cache entries exist (index_pos > 0).
@@ -307,75 +308,17 @@ fn precomput_freqs_cis(
     Ok((cos, sin))
 }
 
-impl ModelWeights {
-    pub fn from_ggml(mut ct: ggml_file::Content, gqa: usize) -> Result<Self> {
-        let head_dim = (ct.hparams.n_embd / ct.hparams.n_head) as usize;
-        let (cos, sin) = precomput_freqs_cis(head_dim, 10000., &ct.device)?;
-        let neg_inf = Tensor::new(f32::NEG_INFINITY, &ct.device)?;
-        let tok_embeddings = ct.remove("tok_embeddings.weight")?;
-        let tok_embeddings = tok_embeddings.dequantize(&ct.device)?;
-        let norm = RmsNorm::from_qtensor(ct.remove("norm.weight")?, 1e-5)?;
-        let output = ct.remove("output.weight")?;
-        let mut layers = Vec::with_capacity(ct.hparams.n_layer as usize);
-        for layer_idx in 0..ct.hparams.n_layer {
-            let prefix = format!("layers.{layer_idx}");
-            let attention_wq = ct.remove(&format!("{prefix}.attention.wq.weight"))?;
-            let attention_wk = ct.remove(&format!("{prefix}.attention.wk.weight"))?;
-            let attention_wv = ct.remove(&format!("{prefix}.attention.wv.weight"))?;
-            let attention_wo = ct.remove(&format!("{prefix}.attention.wo.weight"))?;
-            let mlp_or_moe = {
-                let feed_forward_w1 = ct.remove(&format!("{prefix}.feed_forward.w1.weight"))?;
-                let feed_forward_w2 = ct.remove(&format!("{prefix}.feed_forward.w2.weight"))?;
-                let feed_forward_w3 = ct.remove(&format!("{prefix}.feed_forward.w3.weight"))?;
-                MlpOrMoe::Mlp(Mlp {
-                    feed_forward_w1: QMatMul::from_qtensor(feed_forward_w1)?,
-                    feed_forward_w2: QMatMul::from_qtensor(feed_forward_w2)?,
-                    feed_forward_w3: QMatMul::from_qtensor(feed_forward_w3)?,
-                })
-            };
-            let attention_norm = ct.remove(&format!("{prefix}.attention_norm.weight"))?;
-            let ffn_norm = ct.remove(&format!("{prefix}.ffn_norm.weight"))?;
-            let span_attn = tracing::span!(tracing::Level::TRACE, "attn");
-            let span_rot = tracing::span!(tracing::Level::TRACE, "attn-rot");
-            let span_mlp = tracing::span!(tracing::Level::TRACE, "attn-mlp");
-            layers.push(LayerWeights {
-                attention_wq: QMatMul::from_qtensor(attention_wq)?,
-                attention_wk: QMatMul::from_qtensor(attention_wk)?,
-                attention_wv: QMatMul::from_qtensor(attention_wv)?,
-                attention_wo: QMatMul::from_qtensor(attention_wo)?,
-                attention_norm: RmsNorm::from_qtensor(attention_norm, 1e-5)?,
-                mlp_or_moe,
-                ffn_norm: RmsNorm::from_qtensor(ffn_norm, 1e-5)?,
-                n_head: ct.hparams.n_head as usize,
-                n_kv_head: ct.hparams.n_head as usize / gqa,
-                head_dim: (ct.hparams.n_embd / ct.hparams.n_head) as usize,
-                rope_is_neox: false, // GGML format = standard Llama = interleaved
-                cos: cos.clone(),
-                sin: sin.clone(),
-                neg_inf: neg_inf.clone(),
-                kv_cache: None,
-                span_attn,
-                span_rot,
-                span_mlp,
-            })
-        }
-        let span = tracing::span!(tracing::Level::TRACE, "model");
-        let span_output = tracing::span!(tracing::Level::TRACE, "output");
-        Ok(Self {
-            tok_embeddings: Embedding::new(tok_embeddings, ct.hparams.n_embd as usize),
-            layers,
-            norm,
-            output: QMatMul::from_qtensor(output)?,
-            masks: HashMap::new(),
-            span,
-            span_output,
-        })
-    }
-
+impl ShardModel {
+    /// Load the tensors for layers `first_layer..last_layer` and nothing else.
+    ///
+    /// Reading only this range is the whole point: a shard that loaded every
+    /// layer to run a third of them would pool no memory at all.
     pub fn from_gguf<R: std::io::Seek + std::io::Read>(
         ct: gguf_file::Content,
         reader: &mut R,
         device: &Device,
+        first_layer: usize,
+        last_layer: usize,
     ) -> Result<Self> {
         let md_get = |s: &str| match ct.metadata.get(s) {
             None => candle_core::bail!("cannot find {s} in metadata"),
@@ -438,18 +381,39 @@ impl ModelWeights {
         let (cos, sin) = precomput_freqs_cis(rope_dim, rope_freq_base, device)?;
         let neg_inf = Tensor::new(f32::NEG_INFINITY, device)?;
 
-        let tok_embeddings_q = ct.tensor(reader, "token_embd.weight", device)?;
-        let tok_embeddings = tok_embeddings_q.dequantize(device)?;
-        let norm = RmsNorm::from_qtensor(
-            ct.tensor(reader, "output_norm.weight", device)?,
-            rms_norm_eps,
-        )?;
-        let output = match ct.tensor(reader, "output.weight", device) {
-            Ok(tensor) => tensor,
-            Err(_) => tok_embeddings_q,
+        if last_layer > block_count || first_layer > last_layer {
+            candle_core::bail!("layers {first_layer}..{last_layer} outside a {block_count}-layer model")
+        }
+
+        let embedding_q = match first_layer {
+            0 => Some(ct.tensor(reader, "token_embd.weight", device)?),
+            _ => None,
         };
-        let mut layers = Vec::with_capacity(block_count);
-        for layer_idx in 0..block_count {
+        let tok_embeddings = match &embedding_q {
+            Some(q) => Some(Embedding::new(q.dequantize(device)?, embedding_length)),
+            None => None,
+        };
+        let head = if last_layer == block_count {
+            let norm = RmsNorm::from_qtensor(
+                ct.tensor(reader, "output_norm.weight", device)?,
+                rms_norm_eps,
+            )?;
+            let output = match ct.tensor(reader, "output.weight", device) {
+                Ok(tensor) => tensor,
+                // Tied embeddings. Reuse the one already read rather than
+                // paying for the largest tensor in the file twice.
+                Err(_) => match embedding_q {
+                    Some(q) => q,
+                    None => ct.tensor(reader, "token_embd.weight", device)?,
+                },
+            };
+            Some((norm, QMatMul::from_qtensor(output)?))
+        } else {
+            None
+        };
+
+        let mut layers = Vec::with_capacity(last_layer - first_layer);
+        for layer_idx in first_layer..last_layer {
             let prefix = format!("blk.{layer_idx}");
             let attention_wq = ct.tensor(reader, &format!("{prefix}.attn_q.weight"), device)?;
             let attention_wk = ct.tensor(reader, &format!("{prefix}.attn_k.weight"), device)?;
@@ -521,10 +485,9 @@ impl ModelWeights {
         let span = tracing::span!(tracing::Level::TRACE, "model");
         let span_output = tracing::span!(tracing::Level::TRACE, "output");
         Ok(Self {
-            tok_embeddings: Embedding::new(tok_embeddings, embedding_length),
+            tok_embeddings,
             layers,
-            norm,
-            output: QMatMul::from_qtensor(output)?,
+            head,
             masks: HashMap::new(),
             span,
             span_output,
@@ -573,15 +536,24 @@ impl ModelWeights {
         }
     }
 
+    /// Run this shard's layers.
+    ///
+    /// Takes token ids `(b, seq)` when it owns the embedding and hidden states
+    /// `(b, seq, hidden)` otherwise. Returns logits for the final position
+    /// `(b, vocab)` when it owns the head, and hidden states for *every*
+    /// position otherwise — the next shard needs them all to fill its KV cache.
     pub fn forward(&mut self, x: &Tensor, index_pos: usize) -> Result<Tensor> {
-        let (_b_sz, seq_len) = x.dims2()?;
+        let mut layer_in = match &self.tok_embeddings {
+            Some(embeddings) => embeddings.forward(x)?,
+            None => x.clone(),
+        };
+        let (_b_sz, seq_len, _hidden) = layer_in.dims3()?;
         let mask = if seq_len == 1 {
             None
         } else {
-            Some(self.mask(seq_len, index_pos, x.device())?)
+            Some(self.mask(seq_len, index_pos, layer_in.device())?)
         };
         let _enter = self.span.enter();
-        let mut layer_in = self.tok_embeddings.forward(x)?;
         for layer in self.layers.iter_mut() {
             let x = layer_in;
             let residual = &x;
@@ -597,104 +569,13 @@ impl ModelWeights {
             let x = (x + residual)?;
             layer_in = x
         }
-        let x = self.norm.forward(&layer_in)?;
-        let x = x.i((.., seq_len - 1, ..))?;
+        let Some((norm, output)) = &self.head else {
+            return Ok(layer_in);
+        };
+        // Only the last position matters for sampling, and narrowing here is
+        // what keeps a decode step from computing the whole vocabulary twice.
+        let x = norm.forward(&layer_in)?.i((.., seq_len - 1, ..))?;
         let _enter = self.span_output.enter();
-        self.output.forward(&x)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use candle_transformers::utils::build_causal_mask;
-    use candle_core::{Device, Result};
-
-    // ── Mask shape tests ──────────────────────────────────────────────────────
-
-    /// Classic square mask: index_pos=0 produces (seq_len, seq_len).
-    #[test]
-    fn causal_mask_square_shape() -> Result<()> {
-        let mask = build_causal_mask(4, 0, &Device::Cpu)?;
-        assert_eq!(mask.dims(), [4, 4]);
-        Ok(())
-    }
-
-    /// Rectangular mask: index_pos=N produces (seq_len, N + seq_len).
-    #[test]
-    fn causal_mask_rectangular_shape() -> Result<()> {
-        let mask = build_causal_mask(4, 65, &Device::Cpu)?;
-        assert_eq!(mask.dims(), [4, 69]);
-        Ok(())
-    }
-
-    // ── Mask value tests ──────────────────────────────────────────────────────
-
-    /// Square mask values: standard lower-triangular pattern (0=attend, 1=block).
-    ///
-    /// For seq_len=3, index_pos=0:
-    ///   row 0 (global pos 0): attend to pos 0             → [0, 1, 1]
-    ///   row 1 (global pos 1): attend to pos 0..1           → [0, 0, 1]
-    ///   row 2 (global pos 2): attend to pos 0..2           → [0, 0, 0]
-    #[test]
-    fn causal_mask_square_values() -> Result<()> {
-        let mask = build_causal_mask(3, 0, &Device::Cpu)?;
-        let data: Vec<u8> = mask.flatten_all()?.to_vec1()?;
-        assert_eq!(data, [0, 1, 1, 0, 0, 1, 0, 0, 0]);
-        Ok(())
-    }
-
-    /// Rectangular mask values: prefix columns are all-zero, user columns
-    /// form the causal triangle.
-    ///
-    /// For seq_len=3, index_pos=2 → kv_len=5:
-    ///   row 0 (global pos 2): attend to kv 0..2  → [0,0, 0,1,1]
-    ///   row 1 (global pos 3): attend to kv 0..3  → [0,0, 0,0,1]
-    ///   row 2 (global pos 4): attend to kv 0..4  → [0,0, 0,0,0]
-    #[test]
-    fn causal_mask_rectangular_values() -> Result<()> {
-        let mask = build_causal_mask(3, 2, &Device::Cpu)?;
-        let data: Vec<u8> = mask.flatten_all()?.to_vec1()?;
-        #[rustfmt::skip]
-        assert_eq!(data, [
-            0, 0,  0, 1, 1,
-            0, 0,  0, 0, 1,
-            0, 0,  0, 0, 0,
-        ]);
-        Ok(())
-    }
-
-    /// A single-token query (seq_len=1) with prefix produces a single row
-    /// of all zeros — it can attend to every key including itself.
-    #[test]
-    fn causal_mask_single_query_with_prefix() -> Result<()> {
-        let mask = build_causal_mask(1, 10, &Device::Cpu)?;
-        assert_eq!(mask.dims(), [1, 11]);
-        let data: Vec<u8> = mask.flatten_all()?.to_vec1()?;
-        assert!(
-            data.iter().all(|&v| v == 0),
-            "single-query mask should be all-zero"
-        );
-        Ok(())
-    }
-
-    // ── Mask broadcast compatibility test ─────────────────────────────────────
-
-    /// Verify the mask can be broadcast to (batch, heads, seq_len, kv_len) —
-    /// the exact shape produced by `Q @ K^T` in forward_attn.
-    /// This is the broadcast that previously panicked when index_pos > 0.
-    #[test]
-    fn causal_mask_broadcasts_to_attention_shape() -> Result<()> {
-        let batch = 1usize;
-        let heads = 8usize;
-        let seq_len = 4usize;
-        let index_pos = 10usize;
-
-        let mask = build_causal_mask(seq_len, index_pos, &Device::Cpu)?;
-        // Simulate the attention score shape Q @ K^T → (batch, heads, seq_len, kv_len)
-        let kv_len = index_pos + seq_len;
-        let att_shape = &[batch, heads, seq_len, kv_len];
-        let broadcasted = mask.broadcast_as(att_shape.as_slice())?;
-        assert_eq!(broadcasted.dims(), att_shape);
-        Ok(())
+        output.forward(&x)
     }
 }

@@ -74,6 +74,14 @@ enum Command {
         tokens: u32,
         #[arg(long, default_value_t = 2048)]
         context: u32,
+        /// Layer indices to cut at, comma separated. Each piece becomes a
+        /// shard. Omit for one shard holding the whole model.
+        #[arg(long, value_delimiter = ',')]
+        split: Vec<u32>,
+        /// What crosses a shard boundary. §6 ships f16; f32 separates a wrong
+        /// split from a lossy one.
+        #[arg(long, default_value = "f16")]
+        wire: String,
     },
     /// Measure the link to a paired device.
     Probe {
@@ -94,8 +102,19 @@ async fn main() -> Result<()> {
     let facts = host::detect();
 
     match cli.command {
-        Command::Generate { model, prompt, tokens, context } => {
-            generate::run(&model, &prompt, tokens, context)?
+        Command::Generate { model, prompt, tokens, context, split, wire } => {
+            let wire_dtype = match wire.as_str() {
+                "f16" => lattice_engine::WireDtype::F16,
+                "f32" => lattice_engine::WireDtype::F32,
+                other => bail!("unknown wire dtype {other:?}; expected f16 or f32"),
+            };
+            let options = generate::Options {
+                max_new: tokens,
+                max_context: context,
+                cuts: split,
+                wire_dtype,
+            };
+            generate::run(&model, &prompt, &options)?
         }
         Command::Id => {
             println!("{}  {}  {}", key.id(), facts.name, facts.platform);
