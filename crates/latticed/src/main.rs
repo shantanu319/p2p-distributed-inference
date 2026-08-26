@@ -1,7 +1,7 @@
 //! `latticed` — the Lattice daemon and its CLI.
 //!
-//! This slice covers §7 only: find devices, pair with them, and measure the
-//! link. Nothing here loads a model.
+//! Devices find each other, pair, and measure the link (§7); `generate` runs a
+//! model on this device alone. Nothing yet runs one across two devices.
 
 mod generate;
 mod host;
