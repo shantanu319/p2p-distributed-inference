@@ -3,6 +3,7 @@
 //! This slice covers §7 only: find devices, pair with them, and measure the
 //! link. Nothing here loads a model.
 
+mod generate;
 mod host;
 mod provision;
 
@@ -62,6 +63,18 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         port: u16,
     },
+    /// Generate tokens on this device alone, greedily. Token ids in, ids out.
+    Generate {
+        #[arg(long)]
+        model: PathBuf,
+        /// Prompt token ids, comma separated. A tokenizer arrives with the API.
+        #[arg(long, value_delimiter = ',')]
+        prompt: Vec<u32>,
+        #[arg(long, default_value_t = 32)]
+        tokens: u32,
+        #[arg(long, default_value_t = 2048)]
+        context: u32,
+    },
     /// Measure the link to a paired device.
     Probe {
         target: String,
@@ -81,6 +94,9 @@ async fn main() -> Result<()> {
     let facts = host::detect();
 
     match cli.command {
+        Command::Generate { model, prompt, tokens, context } => {
+            generate::run(&model, &prompt, tokens, context)?
+        }
         Command::Id => {
             println!("{}  {}  {}", key.id(), facts.name, facts.platform);
             println!("{:.1} GB memory", facts.total_memory as f64 / 1e9);
