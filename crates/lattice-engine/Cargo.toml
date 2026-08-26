@@ -8,11 +8,12 @@ license.workspace = true
 candle-core = { version = "0.11", optional = true }
 candle-transformers = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive"] }
+sha2 = { version = "0.10", optional = true }
 thiserror = "2"
 
 [features]
 default = ["candle"]
-candle = ["dep:candle-core", "dep:candle-transformers"]
+candle = ["dep:candle-core", "dep:candle-transformers", "dep:sha2"]
 # Metal on macOS, CUDA on NVIDIA. The AMD card in the Linux box has neither,
 # and falls back to CPU until an engine with a Vulkan backend lands (docs/engine.md).
 metal = ["candle", "candle-core/metal", "candle-transformers/metal"]

@@ -1593,6 +1593,7 @@ dependencies = [
  "candle-core",
  "candle-transformers",
  "serde",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
 ]
 
@@ -1628,6 +1629,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "lattice-engine",
  "lattice-net",
  "libc",
  "tokio",

@@ -4,8 +4,12 @@
 //! this?" costs a header read rather than a download (§8).
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 use candle_core::quantized::gguf_file::Value;
+use sha2::{Digest, Sha256};
 
 use crate::{Error, KvDtype};
 
@@ -20,6 +24,15 @@ pub struct ModelFacts {
 }
 
 impl ModelFacts {
+    /// Read the shape of a model without loading a byte of its weights, which
+    /// is what §8 needs to answer "can my devices hold this?" before a download.
+    pub fn read_file(path: &Path) -> Result<Self, Error> {
+        let mut file = File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+            .map_err(|e| Error::Engine(e.to_string()))?;
+        Self::read(&content.metadata)
+    }
+
     pub fn read(metadata: &HashMap<String, Value>) -> Result<Self, Error> {
         let arch = string(metadata, "general.architecture")?.to_owned();
         let heads = u32_at(metadata, &format!("{arch}.attention.head_count"))?;
@@ -46,6 +59,21 @@ impl ModelFacts {
         let per_token = 2 * u64::from(self.kv_heads) * u64::from(self.head_dim());
         per_token * u64::from(max_context) * u64::from(layers) * dtype.size() as u64
     }
+}
+
+/// §8's content address for a model file.
+pub fn hash_file(path: &Path) -> Result<String, Error> {
+    let mut file = File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1 << 20];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| Error::Engine(e.to_string()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 fn string<'a>(metadata: &'a HashMap<String, Value>, key: &str) -> Result<&'a str, Error> {
