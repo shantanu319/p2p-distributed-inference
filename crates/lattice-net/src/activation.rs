@@ -42,8 +42,14 @@ pub enum StepResult {
 
 /// Runs a shard on behalf of a master. Implemented by the device that holds
 /// the layers; `&self` because one shard serves whatever sessions it is given.
+///
+/// `run` is async so an implementation can hand the work to a thread that owns
+/// the accelerator and await the answer. Doing that matters more than it
+/// sounds: candle's Metal backend is measurably slower when its work migrates
+/// between threads, and a tokio worker pool migrates constantly.
+#[async_trait::async_trait]
 pub trait Executor: Send + Sync {
-    fn run(&self, session: u64, step: Step) -> Result<Payload, String>;
+    async fn run(&self, session: u64, step: Step) -> Result<Payload, String>;
     fn drop_session(&self, session: u64);
 }
 
@@ -51,8 +57,9 @@ pub trait Executor: Send + Sync {
 /// layers — which is most of them, most of the time.
 pub struct NoShards;
 
+#[async_trait::async_trait]
 impl Executor for NoShards {
-    fn run(&self, _session: u64, _step: Step) -> Result<Payload, String> {
+    async fn run(&self, _session: u64, _step: Step) -> Result<Payload, String> {
         Err("this device holds no shards".into())
     }
     fn drop_session(&self, _session: u64) {}
@@ -117,7 +124,10 @@ pub async fn serve_stream(
         if matches!(step, Step::Done) {
             break;
         }
-        let result = match executor.run(session, step) {
+        // Off the connection's task: a decode is tens of milliseconds of
+        // compute, and running it here would hold up every other stream on
+        // this connection for exactly that long.
+        let result = match executor.run(session, step).await {
             Ok(payload) => StepResult::Output(payload),
             Err(why) => StepResult::Failed(why),
         };

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1"
 clap = { version = "4.6.6", features = ["derive"] }
 lattice-engine = { workspace = true, features = ["candle"] }
 lattice-net.workspace = true

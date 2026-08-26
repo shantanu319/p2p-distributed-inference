@@ -5,7 +5,7 @@
 
 mod generate;
 mod host;
-mod provision;
+mod node;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -62,6 +62,10 @@ enum Command {
     Serve {
         #[arg(long, default_value_t = 0)]
         port: u16,
+        /// A GGUF this device is willing to hold layers of. §8's peer transfer
+        /// does not exist yet, so the file has to be here already.
+        #[arg(long)]
+        model: Option<PathBuf>,
     },
     /// Generate tokens on this device alone, greedily. Token ids in, ids out.
     Generate {
@@ -74,10 +78,11 @@ enum Command {
         tokens: u32,
         #[arg(long, default_value_t = 2048)]
         context: u32,
-        /// Layer indices to cut at, comma separated. Each piece becomes a
-        /// shard. Omit for one shard holding the whole model.
-        #[arg(long, value_delimiter = ',')]
-        split: Vec<u32>,
+        /// Where each layer range runs, as `first-last@where`, repeated so the
+        /// ranges tile the model. `where` is `local` or a peer's device id.
+        /// Omit for one shard holding everything, here.
+        #[arg(long)]
+        place: Vec<generate::Placement>,
         /// What crosses a shard boundary. §6 ships f16; f32 separates a wrong
         /// split from a lossy one.
         #[arg(long, default_value = "f16")]
@@ -102,19 +107,28 @@ async fn main() -> Result<()> {
     let facts = host::detect();
 
     match cli.command {
-        Command::Generate { model, prompt, tokens, context, split, wire } => {
+        Command::Generate { model, prompt, tokens, context, place, wire } => {
             let wire_dtype = match wire.as_str() {
                 "f16" => lattice_engine::WireDtype::F16,
                 "f32" => lattice_engine::WireDtype::F32,
                 other => bail!("unknown wire dtype {other:?}; expected f16 or f32"),
             };
+            let places = match place.is_empty() {
+                true => vec![generate::Placement {
+                    first_layer: 0,
+                    last_layer: lattice_engine::ModelFacts::read_file(&model)?.layers,
+                    host: generate::Host::Here,
+                }],
+                false => place,
+            };
+            let (_endpoints, peers) = dial_places(&dir, &key, &places).await?;
             let options = generate::Options {
                 max_new: tokens,
                 max_context: context,
-                cuts: split,
+                places,
                 wire_dtype,
             };
-            generate::run(&model, &prompt, &options)?
+            generate::run(&model, &prompt, &options, &peers).await?
         }
         Command::Id => {
             println!("{}  {}  {}", key.id(), facts.name, facts.platform);
@@ -151,7 +165,7 @@ async fn main() -> Result<()> {
                 bail!("{device} was not paired");
             }
         }
-        Command::Serve { port } => serve(&dir, &key, &facts, port).await?,
+        Command::Serve { port, model } => serve(&dir, &key, &facts, port, model).await?,
         Command::Probe { target, mib } => probe_peer(&dir, &key, &target, mib << 20).await?,
     }
     Ok(())
@@ -261,11 +275,22 @@ async fn pair(
     Ok(())
 }
 
-async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, port: u16) -> Result<()> {
+async fn serve(
+    dir: &std::path::Path,
+    key: &DeviceKey,
+    facts: &host::HostFacts,
+    port: u16,
+    model: Option<PathBuf>,
+) -> Result<()> {
     let store = Arc::new(RwLock::new(TrustStore::load(dir)?));
     let endpoint = Endpoint::bind(bind_addr(port), key, Arc::new(TrustedPeers(store.clone())))?;
     let local = endpoint.local_addr()?;
-    let handler = Arc::new(provision::Provisioner::new(store, key.id(), facts));
+    let handler = Arc::new(node::Node::new(store, key.id(), facts, model.clone()));
+    if let Some(path) = &model {
+        let m = lattice_engine::ModelFacts::read_file(path)
+            .with_context(|| format!("{} is not a GGUF this device can read", path.display()))?;
+        println!("offering {} ({} layers, hidden {})", path.display(), m.layers, m.hidden_dim);
+    }
 
     let mut discovery = Discovery::new()?;
     discovery.advertise(&Advertisement {
@@ -284,7 +309,7 @@ async fn serve(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, 
                 let conn = Arc::new(conn);
                 let handler = handler.clone();
                 tokio::spawn(async move {
-                    let _ = dispatch::serve(conn, handler, Arc::new(lattice_net::NoShards)).await;
+                    let _ = dispatch::serve(conn, handler.clone(), handler).await;
                 });
             }
             // An unpaired device reaching us is expected on a shared network.
@@ -336,7 +361,7 @@ async fn provision_mesh(dir: &std::path::Path, key: &DeviceKey) -> Result<()> {
             continue;
         };
         let conn = mesh.connect(peer.device_id, addrs).await?;
-        let roster = provision::roster_for(peer.device_id, &peers);
+        let roster = node::roster_for(peer.device_id, &peers);
         let introduced = roster.len();
         match control::request(&conn, &Request::Provision(roster)).await? {
             Response::Provisioned {
@@ -354,6 +379,45 @@ async fn provision_mesh(dir: &std::path::Path, key: &DeviceKey) -> Result<()> {
 }
 
 /// One mDNS browse for several devices at once, rather than one per device.
+/// Opens one connection per device named in the plan. The endpoints come back
+/// with the connections because dropping an `Endpoint` tears its connections
+/// down with it.
+async fn dial_places(
+    dir: &std::path::Path,
+    key: &DeviceKey,
+    places: &[generate::Placement],
+) -> Result<(Vec<Endpoint>, HashMap<DeviceId, lattice_net::Connection>)> {
+    let mut wanted: Vec<DeviceId> = places
+        .iter()
+        .filter_map(|p| match p.host {
+            generate::Host::Peer(id) => Some(id),
+            generate::Host::Here => None,
+        })
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    if wanted.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
+    }
+
+    let store = Arc::new(RwLock::new(TrustStore::load(dir)?));
+    let located = locate(&wanted)?;
+    let (mut endpoints, mut peers) = (Vec::new(), HashMap::new());
+    for id in wanted {
+        let addrs = located
+            .get(&id)
+            .cloned()
+            .with_context(|| format!("{id} is not on the network"))?;
+        let policy = Arc::new(TrustedPeers(store.clone()));
+        let (endpoint, conn) = connect_any(key, policy, &usable(addrs))
+            .await
+            .with_context(|| format!("connecting to {id}"))?;
+        endpoints.push(endpoint);
+        peers.insert(id, conn);
+    }
+    Ok((endpoints, peers))
+}
+
 fn locate(wanted: &[DeviceId]) -> Result<HashMap<DeviceId, Vec<SocketAddr>>> {
     let discovery = Discovery::new()?;
     let browser = discovery.browse()?;

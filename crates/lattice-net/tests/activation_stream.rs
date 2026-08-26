@@ -31,8 +31,9 @@ struct Increment {
     refuse: bool,
 }
 
+#[async_trait::async_trait]
 impl Executor for Increment {
-    fn run(&self, _session: u64, step: Step) -> Result<Payload, String> {
+    async fn run(&self, _session: u64, step: Step) -> Result<Payload, String> {
         self.steps.fetch_add(1, Ordering::SeqCst);
         if self.refuse {
             return Err("no such layer range".into());
