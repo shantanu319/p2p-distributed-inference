@@ -51,7 +51,7 @@ pub async fn measure(conn: &Connection, probe_bytes: usize) -> Result<LinkQualit
 async fn measure_rtt(conn: &Connection) -> Result<Duration, Error> {
     // Priced as an activation, because what it measures is what activations
     // will experience once the link is busy.
-    let (mut send, mut recv) = conn.open(probe_stream(StreamKind::Activation)).await?;
+    let (mut send, mut recv) = conn.open(probe_stream(StreamKind::Probe)).await?;
     let mut best = Duration::MAX;
     let mut byte = [0u8; 1];
     for _ in 0..RTT_SAMPLES {
@@ -66,7 +66,7 @@ async fn measure_rtt(conn: &Connection) -> Result<Duration, Error> {
 async fn measure_throughput(conn: &Connection, probe_bytes: usize) -> Result<f64, Error> {
     // Bulk: a probe must not delay activations, for the same reason a model
     // transfer must not (§8).
-    let (mut send, mut recv) = conn.open(probe_stream(StreamKind::Bulk)).await?;
+    let (mut send, mut recv) = conn.open(probe_stream(StreamKind::Probe)).await?;
     let payload = vec![0u8; probe_bytes];
 
     let started = Instant::now();

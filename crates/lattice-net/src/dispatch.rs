@@ -32,8 +32,8 @@ pub async fn serve(
                 StreamKind::Activation => {
                     activation::serve_stream(header.session, executor, send, recv).await;
                 }
-                // Model transfer (§8) does not exist yet, so bulk is still the
-                // probe's payload channel and nothing else.
+                StreamKind::Probe => probe::serve_stream(send, recv).await,
+                // Model transfer (§8) does not exist yet.
                 StreamKind::Bulk => probe::serve_stream(send, recv).await,
             }
         });

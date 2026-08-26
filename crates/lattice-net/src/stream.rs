@@ -24,8 +24,11 @@ pub enum StreamKind {
     Control = 1,
     /// §6 frames for one session across one shard boundary.
     Activation = 2,
-    /// Model transfer (§8) and probe payloads. Must never delay the others.
+    /// Model transfer (§8). Must never delay the others.
     Bulk = 3,
+    /// Link measurement. Its own kind so it cannot be mistaken for work: an
+    /// echoed probe payload and a shard's output are both just bytes.
+    Probe = 4,
 }
 
 impl StreamKind {
@@ -34,6 +37,7 @@ impl StreamKind {
             1 => Ok(Self::Control),
             2 => Ok(Self::Activation),
             3 => Ok(Self::Bulk),
+            4 => Ok(Self::Probe),
             other => Err(Error::StreamHeader(format!("unknown stream kind {other}"))),
         }
     }
@@ -43,6 +47,9 @@ impl StreamKind {
             Self::Control => PRIORITY_CONTROL,
             Self::Activation => PRIORITY_ACTIVATION,
             Self::Bulk => PRIORITY_BULK,
+            // Measured at the priority real activations get, so the number
+            // means something for the hop it is predicting.
+            Self::Probe => PRIORITY_ACTIVATION,
         }
     }
 }
