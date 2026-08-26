@@ -1591,10 +1591,12 @@ name = "lattice-engine"
 version = "0.0.1"
 dependencies = [
  "candle-core",
+ "candle-nn",
  "candle-transformers",
  "serde",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
