@@ -1,0 +1,27 @@
+//! The shard ABI from PLAN.md §6, and the engines that implement it.
+//!
+//! A shard is a contiguous range of transformer layers plus the KV cache for
+//! that range. The interface is deliberately six calls wide so that swapping
+//! the engine underneath it stays a contained decision.
+
+mod abi;
+
+pub use abi::{Activation, KvDtype, Payload, Shard, ShardSpec, ShardStats, WireDtype};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("shard holds layers {held:?}, but was handed {got}")]
+    WrongPayload { held: (u32, u32), got: &'static str },
+    #[error("activation is {got} bytes, but {n_tokens}x{hidden_dim} {dtype:?} needs {want}")]
+    Shape {
+        got: usize,
+        want: usize,
+        n_tokens: u32,
+        hidden_dim: u32,
+        dtype: WireDtype,
+    },
+    #[error("no such session {0}")]
+    UnknownSession(u64),
+    #[error("{0}")]
+    Engine(String),
+}

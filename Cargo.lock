@@ -736,6 +736,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-engine"
+version = "0.0.1"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "lattice-net"
 version = "0.0.1"
 dependencies = [
