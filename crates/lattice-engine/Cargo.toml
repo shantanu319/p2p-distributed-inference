@@ -5,5 +5,15 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+candle-core = { version = "0.11", optional = true }
+candle-transformers = { version = "0.11", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
+
+[features]
+default = ["candle"]
+candle = ["dep:candle-core", "dep:candle-transformers"]
+# Metal on macOS, CUDA on NVIDIA. The AMD card in the Linux box has neither,
+# and falls back to CPU until an engine with a Vulkan backend lands (docs/engine.md).
+metal = ["candle", "candle-core/metal", "candle-transformers/metal"]
+cuda = ["candle", "candle-core/cuda", "candle-transformers/cuda"]
