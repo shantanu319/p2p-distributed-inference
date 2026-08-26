@@ -76,6 +76,7 @@ impl ControlHandler for Provisioner {
                 platform: self.identity.2.clone(),
             },
             Request::Provision(peers) => self.accept_introductions(from, peers),
+            Request::LoadShard(_) => Response::Refused("this device holds no shards".into()),
         }
     }
 }

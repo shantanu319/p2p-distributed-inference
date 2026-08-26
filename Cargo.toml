@@ -8,5 +8,5 @@ edition = "2024"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-lattice-engine = { path = "crates/lattice-engine" }
+lattice-engine = { path = "crates/lattice-engine", default-features = false }
 lattice-net = { path = "crates/lattice-net" }

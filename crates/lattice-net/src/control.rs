@@ -6,6 +6,7 @@
 //! request at the same time with no way to tell the replies apart.
 
 use ed25519_dalek::VerifyingKey;
+use lattice_engine::ShardSpec;
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{read_frame, write_frame};
@@ -23,6 +24,9 @@ pub enum Request {
     /// A device the user already trusts, handing over the keys of the others
     /// so they can talk to each other directly (see docs/streams.md §7).
     Provision(Vec<Introduction>),
+    /// Hold this layer range for whoever is asking. Sent before any activation
+    /// stream opens, because a follower cannot execute what it has not loaded.
+    LoadShard(ShardSpec),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,6 +39,12 @@ pub enum Response {
     Provisioned {
         added: u32,
         already_known: u32,
+    },
+    ShardLoaded {
+        /// What the shard holds resident, so the master can check its plan
+        /// against what actually happened rather than what it predicted.
+        weight_bytes: u64,
+        kv_bytes: u64,
     },
     /// The peer understood the request and declined it.
     Refused(String),
@@ -143,6 +153,24 @@ mod tests {
             platform: "linux-x86_64".into(),
         };
         assert!(bad.into_peer(voucher.id()).is_err());
+    }
+
+    #[test]
+    fn a_load_request_fits_a_control_frame() {
+        let spec = ShardSpec {
+            model_hash: "a".repeat(64),
+            first_layer: 40,
+            last_layer: 80,
+            max_context: 8192,
+            kv_dtype: lattice_engine::KvDtype::F16,
+            wire_dtype: lattice_engine::WireDtype::F16,
+        };
+        let bytes = postcard::to_allocvec(&Request::LoadShard(spec.clone())).unwrap();
+        assert!(bytes.len() < MAX_CONTROL_FRAME);
+        let Request::LoadShard(decoded) = postcard::from_bytes(&bytes).unwrap() else {
+            panic!("not a load request");
+        };
+        assert_eq!(decoded, spec);
     }
 
     #[test]

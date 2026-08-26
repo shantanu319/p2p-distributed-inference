@@ -38,6 +38,7 @@ impl ControlHandler for Recorder {
                 added: peers.len() as u32,
                 already_known: 0,
             },
+            Request::LoadShard(_) => Response::Refused("this fixture holds no layers".into()),
         }
     }
 }

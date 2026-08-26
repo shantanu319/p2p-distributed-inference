@@ -1608,6 +1608,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "hmac 0.13.0",
+ "lattice-engine",
  "mdns-sd",
  "postcard",
  "quinn",
