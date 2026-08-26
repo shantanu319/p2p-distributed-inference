@@ -35,6 +35,10 @@ pub struct Activation {
     pub n_tokens: u32,
     pub hidden_dim: u32,
     pub dtype: WireDtype,
+    /// As bytes, not as a sequence of them. serde's default would encode a
+    /// 67 MB prefill activation one element at a time (§1); `serde_bytes` makes
+    /// it one length-prefixed copy.
+    #[serde(with = "serde_bytes")]
     pub data: Vec<u8>,
 }
 
@@ -138,6 +142,24 @@ mod tests {
     fn activation_accepts_the_exact_size() {
         let a = Activation::new(2, 8, WireDtype::F16, vec![0; 32]).expect("exact");
         assert_eq!(a.data.len(), 32);
+    }
+
+    #[test]
+    fn a_big_activation_encodes_as_bytes_not_as_a_sequence_of_them() {
+        // 4096 tokens at hidden 8192 in f16: §1's prefill frame. Encoded as
+        // bytes this is the payload plus a small header; encoded as a sequence
+        // postcard would still emit one byte each, but at a per-element cost
+        // that shows up as seconds on a frame this size.
+        let payload = Payload::Hidden(
+            Activation::new(4096, 8192, WireDtype::F16, vec![0xab; 4096 * 8192 * 2]).unwrap(),
+        );
+        let encoded = postcard::to_allocvec(&payload).unwrap();
+        assert!(
+            encoded.len() < 4096 * 8192 * 2 + 64,
+            "{} bytes of overhead",
+            encoded.len() - 4096 * 8192 * 2
+        );
+        assert_eq!(postcard::from_bytes::<Payload>(&encoded).unwrap(), payload);
     }
 
     #[test]
