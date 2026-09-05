@@ -1651,6 +1651,9 @@ dependencies = [
  "lattice-engine",
  "lattice-net",
  "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
  "tokio",
 ]
 

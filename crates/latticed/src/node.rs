@@ -204,6 +204,7 @@ impl ControlHandler for Node {
             },
             Request::Provision(peers) => self.accept_introductions(from, peers),
             Request::LoadShard(spec) => self.load_shard(spec),
+            Request::RegisterWorker { .. } => Response::Refused("this device is not running as master".into()),
         }
     }
 }

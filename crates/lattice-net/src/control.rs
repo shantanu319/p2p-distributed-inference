@@ -27,6 +27,7 @@ pub enum Request {
     /// Hold this layer range for whoever is asking. Sent before any activation
     /// stream opens, because a follower cannot execute what it has not loaded.
     LoadShard(ShardSpec),
+    RegisterWorker { port: u16 },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,6 +49,7 @@ pub enum Response {
     },
     /// The peer understood the request and declined it.
     Refused(String),
+    WorkerRegistered,
 }
 
 /// One device's identity as vouched for by another.

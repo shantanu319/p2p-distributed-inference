@@ -39,6 +39,7 @@ impl ControlHandler for Recorder {
                 already_known: 0,
             },
             Request::LoadShard(_) => Response::Refused("this fixture holds no layers".into()),
+            Request::RegisterWorker { .. } => Response::WorkerRegistered,
         }
     }
 }

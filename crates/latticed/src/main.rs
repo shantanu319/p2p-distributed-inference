@@ -6,6 +6,8 @@
 mod generate;
 mod host;
 mod node;
+mod startup;
+mod pairing_session;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -33,6 +35,10 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Start a master and accept workers on the LAN")]
+    Master(startup::MasterOptions),
+    #[command(about = "Find a master, pair once, and stay connected")]
+    Worker(startup::WorkerOptions),
     /// Print this device's identity.
     Id,
     /// List Lattice devices on the network. Discovery implies no trust.
@@ -107,6 +113,8 @@ async fn main() -> Result<()> {
     let facts = host::detect();
 
     match cli.command {
+        Command::Master(options) => startup::master(&dir, &key, &facts, options).await?,
+        Command::Worker(options) => startup::worker(&dir, &key, &facts, options).await?,
         Command::Generate { model, prompt, tokens, context, place, wire } => {
             let wire_dtype = match wire.as_str() {
                 "f16" => lattice_engine::WireDtype::F16,
