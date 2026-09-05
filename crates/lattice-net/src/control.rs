@@ -27,7 +27,10 @@ pub enum Request {
     /// Hold this layer range for whoever is asking. Sent before any activation
     /// stream opens, because a follower cannot execute what it has not loaded.
     LoadShard(ShardSpec),
-    RegisterWorker { port: u16 },
+    RegisterWorker {
+        port: u16,
+    },
+    InferenceInfo,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +53,7 @@ pub enum Response {
     /// The peer understood the request and declined it.
     Refused(String),
     WorkerRegistered,
+    InferenceInfo(EngineCapabilities),
 }
 
 /// One device's identity as vouched for by another.
@@ -104,13 +108,15 @@ pub async fn request(conn: &Connection, request: &Request) -> Result<Response, E
 /// Answers one already-accepted control stream.
 pub async fn answer(
     from: DeviceId,
-    handler: &dyn ControlHandler,
+    handler: std::sync::Arc<dyn ControlHandler>,
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
 ) -> Result<(), Error> {
     let bytes = read_frame(&mut recv, MAX_CONTROL_FRAME).await?;
     let response = match postcard::from_bytes(&bytes) {
-        Ok(request) => handler.handle(from, request),
+        Ok(request) => tokio::task::spawn_blocking(move || handler.handle(from, request))
+            .await
+            .map_err(|error| Error::Stream(format!("control handler failed: {error}")))?,
         // A peer we cannot parse gets told so rather than left hanging.
         Err(e) => Response::Refused(format!("unintelligible request: {e}")),
     };
@@ -195,4 +201,20 @@ mod tests {
             Response::Refused(_)
         ));
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GpuDevice {
+    pub name: String,
+    pub description: String,
+    pub kind: String,
+    pub total_memory: u64,
+    pub free_memory: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EngineCapabilities {
+    pub revision: String,
+    pub device: GpuDevice,
+    pub busy: bool,
 }

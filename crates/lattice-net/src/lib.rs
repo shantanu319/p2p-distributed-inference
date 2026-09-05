@@ -9,21 +9,23 @@ pub mod identity;
 pub mod mesh;
 pub mod pairing;
 pub mod probe;
+pub mod rpc;
 pub mod stream;
 pub mod tls;
 pub mod transport;
 pub mod trust;
 
 pub use activation::{Executor, NoShards, RemoteShard, Step, StepResult};
-pub use control::{ControlHandler, Introduction, Request, Response};
-pub use dispatch::RefuseControl;
+pub use control::{ControlHandler, EngineCapabilities, GpuDevice, Introduction, Request, Response};
 pub use discovery::{Advertisement, DiscoveredPeer, Discovery, PeerEvent};
+pub use dispatch::RefuseControl;
 pub use identity::{DeviceId, DeviceKey};
 pub use mesh::Mesh;
 pub use pairing::{Pairing, PairingCode};
-pub use transport::AcceptAnyPeer;
 pub use probe::{LinkQuality, measure};
+pub use rpc::{RpcHandler, RpcProxy, RpcSession};
 pub use stream::{StreamHeader, StreamKind};
+pub use transport::AcceptAnyPeer;
 pub use transport::{Connection, Endpoint, PeerPolicy};
 pub use trust::{PairedPeer, TrustStore, TrustedPeers};
 

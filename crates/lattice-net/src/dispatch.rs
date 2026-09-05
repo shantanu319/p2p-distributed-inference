@@ -17,6 +17,15 @@ pub async fn serve(
     control: Arc<dyn ControlHandler>,
     executor: Arc<dyn Executor>,
 ) -> Result<(), Error> {
+    serve_with_rpc(conn, control, executor, Arc::new(crate::rpc::DenyRpc)).await
+}
+
+pub async fn serve_with_rpc(
+    conn: Arc<Connection>,
+    control: Arc<dyn ControlHandler>,
+    executor: Arc<dyn Executor>,
+    rpc: Arc<dyn crate::rpc::RpcHandler>,
+) -> Result<(), Error> {
     let from = conn.peer_id();
     loop {
         let Ok((header, send, recv)) = conn.accept_stream().await else {
@@ -24,13 +33,17 @@ pub async fn serve(
         };
         let control = control.clone();
         let executor = executor.clone();
+        let rpc = rpc.clone();
         tokio::spawn(async move {
             match header.kind {
                 StreamKind::Control => {
-                    let _ = control::answer(from, control.as_ref(), send, recv).await;
+                    let _ = control::answer(from, control, send, recv).await;
                 }
                 StreamKind::Activation => {
                     activation::serve_stream(header.session, executor, send, recv).await;
+                }
+                StreamKind::InferenceRpc => {
+                    let _ = crate::rpc::serve(from, rpc, send, recv).await;
                 }
                 StreamKind::Probe => probe::serve_stream(send, recv).await,
                 // Model transfer (§8) does not exist yet.

@@ -29,6 +29,7 @@ pub enum StreamKind {
     /// Link measurement. Its own kind so it cannot be mistaken for work: an
     /// echoed probe payload and a shard's output are both just bytes.
     Probe = 4,
+    InferenceRpc = 5,
 }
 
 impl StreamKind {
@@ -38,6 +39,7 @@ impl StreamKind {
             2 => Ok(Self::Activation),
             3 => Ok(Self::Bulk),
             4 => Ok(Self::Probe),
+            5 => Ok(Self::InferenceRpc),
             other => Err(Error::StreamHeader(format!("unknown stream kind {other}"))),
         }
     }
@@ -49,7 +51,7 @@ impl StreamKind {
             Self::Bulk => PRIORITY_BULK,
             // Measured at the priority real activations get, so the number
             // means something for the hop it is predicting.
-            Self::Probe => PRIORITY_ACTIVATION,
+            Self::Probe | Self::InferenceRpc => PRIORITY_ACTIVATION,
         }
     }
 }

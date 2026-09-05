@@ -2,11 +2,12 @@
 
 use ed25519_dalek::VerifyingKey;
 use lattice_net::transport::PeerPolicy;
-use lattice_net::{NoShards, 
-    Connection, ControlHandler, DeviceId, DeviceKey, Endpoint, Request, Response, control, dispatch,
+use lattice_net::{
+    Connection, ControlHandler, DeviceId, DeviceKey, Endpoint, NoShards, Request, Response,
+    control, dispatch,
 };
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 #[derive(Debug)]
 struct Allow(VerifyingKey);
@@ -40,6 +41,7 @@ impl ControlHandler for Recorder {
             },
             Request::LoadShard(_) => Response::Refused("this fixture holds no layers".into()),
             Request::RegisterWorker { .. } => Response::WorkerRegistered,
+            Request::InferenceInfo => Response::Refused("no engine".into()),
         }
     }
 }
@@ -95,7 +97,10 @@ async fn a_request_reaches_the_handler_with_the_authenticated_peer_id() {
     // The handler saw the dialer's real device id, taken from its certificate.
     let seen = f.recorder.seen_from.lock().unwrap().clone();
     assert_eq!(seen.len(), 1);
-    assert_ne!(seen[0], my_id, "should be the dialer's id, not the server's");
+    assert_ne!(
+        seen[0], my_id,
+        "should be the dialer's id, not the server's"
+    );
 }
 
 #[tokio::test]
