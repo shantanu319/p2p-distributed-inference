@@ -1,14 +1,10 @@
-//! `latticed` — the Lattice daemon and its CLI.
-//!
-//! Devices find each other, pair, and measure the link (§7); `generate` runs a
-//! model on this device alone. Nothing yet runs one across two devices.
-
+mod chat;
 mod generate;
 mod host;
 mod node;
-mod startup;
 mod pairing_session;
 mod runtime;
+mod startup;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -36,6 +32,15 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[command(about = "Chat using GPUs on this machine and its paired workers")]
+    Chat(chat::Options),
+    #[command(about = "Report available inference GPUs")]
+    Devices {
+        #[arg(long)]
+        engine_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     #[command(about = "Start a master and accept workers on the LAN")]
     Master(startup::MasterOptions),
     #[command(about = "Find a master, pair once, and stay connected")]
@@ -114,9 +119,35 @@ async fn main() -> Result<()> {
     let facts = host::detect();
 
     match cli.command {
+        Command::Chat(options) => chat::run(&dir, &key, options).await?,
+        Command::Devices { engine_dir, json } => {
+            let engine = runtime::Engine::locate(engine_dir.as_deref())?;
+            let devices = engine.devices()?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&devices)?);
+            } else {
+                for device in devices {
+                    println!(
+                        "{}: {} ({}, {:.1} GiB free / {:.1} GiB total)",
+                        device.name,
+                        device.description,
+                        device.kind,
+                        device.free_memory as f64 / 1073741824.0,
+                        device.total_memory as f64 / 1073741824.0
+                    );
+                }
+            }
+        }
         Command::Master(options) => startup::master(&dir, &key, &facts, options).await?,
         Command::Worker(options) => startup::worker(&dir, &key, &facts, options).await?,
-        Command::Generate { model, prompt, tokens, context, place, wire } => {
+        Command::Generate {
+            model,
+            prompt,
+            tokens,
+            context,
+            place,
+            wire,
+        } => {
             let wire_dtype = match wire.as_str() {
                 "f16" => lattice_engine::WireDtype::F16,
                 "f32" => lattice_engine::WireDtype::F32,
@@ -219,7 +250,12 @@ fn discover(window: Duration, self_id: DeviceId) -> Result<()> {
     Ok(())
 }
 
-async fn host_pairing(dir: &std::path::Path, key: &DeviceKey, facts: &host::HostFacts, port: u16) -> Result<()> {
+async fn host_pairing(
+    dir: &std::path::Path,
+    key: &DeviceKey,
+    facts: &host::HostFacts,
+    port: u16,
+) -> Result<()> {
     let code = PairingCode::generate();
     let endpoint = Endpoint::bind(bind_addr(port), key, Arc::new(AcceptAnyPeer))?;
     let local = endpoint.local_addr()?;
@@ -298,7 +334,12 @@ async fn serve(
     if let Some(path) = &model {
         let m = lattice_engine::ModelFacts::read_file(path)
             .with_context(|| format!("{} is not a GGUF this device can read", path.display()))?;
-        println!("offering {} ({} layers, hidden {})", path.display(), m.layers, m.hidden_dim);
+        println!(
+            "offering {} ({} layers, hidden {})",
+            path.display(),
+            m.layers,
+            m.hidden_dim
+        );
     }
 
     let mut discovery = Discovery::new()?;
@@ -310,11 +351,20 @@ async fn serve(
         port: local.port(),
     })?;
 
-    println!("{} serving as {} on port {}", facts.name, key.id(), local.port());
+    println!(
+        "{} serving as {} on port {}",
+        facts.name,
+        key.id(),
+        local.port()
+    );
     while let Some(incoming) = endpoint.accept().await {
         match incoming {
             Ok(conn) => {
-                println!("peer {} connected from {}", conn.peer_id(), conn.remote_address());
+                println!(
+                    "peer {} connected from {}",
+                    conn.peer_id(),
+                    conn.remote_address()
+                );
                 let conn = Arc::new(conn);
                 let handler = handler.clone();
                 tokio::spawn(async move {
@@ -328,7 +378,12 @@ async fn serve(
     Ok(())
 }
 
-async fn probe_peer(dir: &std::path::Path, key: &DeviceKey, target: &str, bytes: usize) -> Result<()> {
+async fn probe_peer(
+    dir: &std::path::Path,
+    key: &DeviceKey,
+    target: &str,
+    bytes: usize,
+) -> Result<()> {
     let store = Arc::new(RwLock::new(TrustStore::load(dir)?));
     let addrs = resolve(target, key.id())?;
     let (_endpoint, conn) = connect_any(key, Arc::new(TrustedPeers(store)), &addrs).await?;

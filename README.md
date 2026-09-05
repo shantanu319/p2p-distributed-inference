@@ -5,7 +5,7 @@ Run bigger local models by pooling the machines you already own. See
 
 ## Status
 
-**No inference yet.** What exists is the network layer the rest will sit on:
+The prototype supports paired networking and distributed terminal chat:
 
 - Ed25519 device identity, one keypair per install
 - mDNS discovery on the LAN
@@ -15,6 +15,8 @@ Run bigger local models by pooling the machines you already own. See
 - a master that introduces devices to each other, so followers talk directly
   rather than relaying (see [docs/streams.md](docs/streams.md))
 - link measurement: RTT, throughput, and the per-boundary cost from PLAN.md §1
+- GPU chat using Metal on macOS and Vulkan on Linux, with automatic tensor
+  transfer over authenticated QUIC and placement based on reported GPU memory
 
 Verified on macOS/aarch64 and Linux/aarch64.
 
@@ -88,9 +90,65 @@ The lower-level `host`, `pair`, `serve`, `discover`, `peers`, `probe`, and
 processes before starting a master or worker, even if they use different ports:
 one device identity should have one running daemon.
 
-## Running a model across them
+## GPU chat
 
-Both machines need the same GGUF. §8's peer transfer does not exist yet, so
+Build the inference runtime on both machines:
+
+```bash
+./scripts/setup.sh --inference
+latticed devices
+```
+
+This builds the same pinned llama.cpp revision with Metal on macOS or Vulkan
+on Linux. The installer prints any missing system dependencies. Gaming's RX
+7600 uses its existing RADV driver; ROCm is not required for this backend.
+
+Restart the worker with GPU inference required:
+
+```bash
+latticed worker --require-gpu
+```
+
+On the master, leave `latticed master` running and open another terminal:
+
+```bash
+latticed chat --model /path/to/model.gguf
+```
+
+For a small test model, download SmolLM2-135M-Instruct Q4_K_M (135M
+parameters, 105 MB) on the master. The script verifies its pinned SHA-256 and
+reuses a matching cached file:
+
+```bash
+MODEL="$(./scripts/fetch-test-model.sh)"
+latticed chat --model "$MODEL" --context 2048 --tokens 64
+```
+
+The GGUF only needs to exist on the master. Chat discovers paired workers,
+checks engine versions and live GPU capabilities, assigns contiguous layers,
+and transfers their tensors automatically. Each selected GPU receives transformer
+work. The discrete GPU is preferred over a Ryzen integrated GPU; `--device`
+selects an exact name from `latticed devices` when needed.
+
+For a single response or explicit worker selection:
+
+```bash
+latticed chat --model /path/to/model.gguf --worker 192.168.7.62:47900 \
+  --context 2048 --tokens 128 --prompt "Explain why the sky is blue."
+```
+
+Repeat `--worker` for multiple devices. `--local` explicitly runs on the master's
+GPU alone. A missing worker or GPU is an error; chat does not silently switch to
+local CPU inference. `/exit` or Ctrl-C stops chat.
+
+The first milestone supports a single-file Llama-family GGUF and one active
+chat per worker. It uses backend graph RPC over a dedicated QUIC stream.
+The existing Candle activation protocol is a separate path. See
+[docs/inference.md](docs/inference.md) for placement, cache, and validation details.
+
+## Manual activation pipeline
+
+The older `generate` command needs the same GGUF on both machines, so
 copy it across yourself. The hash is checked before anything loads, so two
 machines holding different weights is refused rather than discovered later as
 fluent nonsense.
@@ -113,9 +171,8 @@ latticed generate --model llama.gguf --prompt 1,15043,29892 \
 overlap would run them twice, so both are refused. Omit `--place` entirely to
 run everything here.
 
-Prompts and output are token ids: tokenization belongs with the HTTP surface,
-which does not exist yet. Sampling is greedy, which is what the correctness
-harness compares.
+For this older command, prompts and output are token IDs and sampling is greedy.
+Use `chat` above for tokenization, conversation templates, and readable text.
 
 **Expect the token stream to diverge across backends.** Metal and CUDA and CPU
 agree for a few dozen tokens at temperature 0 and then part ways — measured at
