@@ -12,11 +12,11 @@ mod facts;
 #[cfg(feature = "candle")]
 mod llama;
 
+pub use abi::{Activation, KvDtype, Payload, Shard, ShardSpec, ShardStats, WireDtype};
 #[cfg(feature = "candle")]
 pub use candle::CandleShard;
 #[cfg(feature = "candle")]
-pub use facts::{ModelFacts, hash_file};
-pub use abi::{Activation, KvDtype, Payload, Shard, ShardSpec, ShardStats, WireDtype};
+pub use facts::{ModelFacts, ModelInventory, hash_file};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

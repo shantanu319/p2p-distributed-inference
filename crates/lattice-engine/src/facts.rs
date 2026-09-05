@@ -27,7 +27,8 @@ impl ModelFacts {
     /// Read the shape of a model without loading a byte of its weights, which
     /// is what §8 needs to answer "can my devices hold this?" before a download.
     pub fn read_file(path: &Path) -> Result<Self, Error> {
-        let mut file = File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
+        let mut file =
+            File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
         let content = candle_core::quantized::gguf_file::Content::read(&mut file)
             .map_err(|e| Error::Engine(e.to_string()))?;
         Self::read(&content.metadata)
@@ -63,11 +64,14 @@ impl ModelFacts {
 
 /// §8's content address for a model file.
 pub fn hash_file(path: &Path) -> Result<String, Error> {
-    let mut file = File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
+    let mut file =
+        File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 1 << 20];
     loop {
-        let n = file.read(&mut buf).map_err(|e| Error::Engine(e.to_string()))?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| Error::Engine(e.to_string()))?;
         if n == 0 {
             break;
         }
@@ -78,7 +82,10 @@ pub fn hash_file(path: &Path) -> Result<String, Error> {
 
 fn string<'a>(metadata: &'a HashMap<String, Value>, key: &str) -> Result<&'a str, Error> {
     let value = metadata.get(key).ok_or_else(|| missing(key))?;
-    value.to_string().map(String::as_str).map_err(|e| Error::Engine(e.to_string()))
+    value
+        .to_string()
+        .map(String::as_str)
+        .map_err(|e| Error::Engine(e.to_string()))
 }
 
 /// GGUF writers disagree on integer width for the same key, so accept any.
@@ -143,5 +150,159 @@ mod tests {
         let mut metadata = llama_metadata();
         metadata.remove("llama.block_count");
         assert!(ModelFacts::read(&metadata).is_err());
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ModelInventory {
+    pub facts: ModelFacts,
+    pub layer_bytes: Vec<u64>,
+    pub output_bytes: u64,
+}
+
+impl ModelInventory {
+    pub fn read_file(path: &Path) -> Result<Self, Error> {
+        let mut file =
+            File::open(path).map_err(|e| Error::Engine(format!("{}: {e}", path.display())))?;
+        let content = candle_core::quantized::gguf_file::Content::read(&mut file)
+            .map_err(|e| Error::Engine(e.to_string()))?;
+        Self::read(&content)
+    }
+
+    fn read(content: &candle_core::quantized::gguf_file::Content) -> Result<Self, Error> {
+        if content.metadata.contains_key("split.count")
+            && u32_at(&content.metadata, "split.count")? > 1
+        {
+            return Err(Error::Engine(
+                "split GGUF files are not supported; use a single-file GGUF".into(),
+            ));
+        }
+        let facts = ModelFacts::read(&content.metadata)?;
+        if facts.arch != "llama" {
+            return Err(Error::UnsupportedArch(facts.arch));
+        }
+        if facts.layers == 0 || facts.layers > 4096 {
+            return Err(Error::Engine(
+                "model must have between 1 and 4096 layers".into(),
+            ));
+        }
+        let mut layer_bytes = vec![0u64; facts.layers as usize];
+        let mut output_bytes = 0u64;
+        for (name, tensor) in &content.tensor_infos {
+            let invalid = || Error::Engine(format!("invalid tensor size or layer index: {name}"));
+            let elements = tensor
+                .shape
+                .dims()
+                .iter()
+                .try_fold(1u64, |n, &d| n.checked_mul(u64::try_from(d).ok()?))
+                .ok_or_else(invalid)?;
+            let block = tensor.ggml_dtype.block_size() as u64;
+            if elements == 0 || elements % block != 0 {
+                return Err(invalid());
+            }
+            let bytes = (elements / block)
+                .checked_mul(tensor.ggml_dtype.type_size() as u64)
+                .ok_or_else(invalid)?;
+            let destination = if let Some(rest) = name.strip_prefix("blk.") {
+                let index: usize = rest
+                    .split('.')
+                    .next()
+                    .ok_or_else(invalid)?
+                    .parse()
+                    .map_err(|_| invalid())?;
+                layer_bytes.get_mut(index).ok_or_else(invalid)?
+            } else {
+                &mut output_bytes
+            };
+            *destination = destination.checked_add(bytes).ok_or_else(invalid)?;
+        }
+        if layer_bytes.contains(&0) {
+            return Err(Error::Engine(
+                "GGUF is missing weights for a transformer layer".into(),
+            ));
+        }
+        Ok(Self {
+            facts,
+            layer_bytes,
+            output_bytes,
+        })
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    use candle_core::quantized::{
+        GgmlDType,
+        gguf_file::{Content, TensorInfo, VersionedMagic},
+    };
+
+    fn content() -> Content {
+        Content {
+            magic: VersionedMagic::GgufV2,
+            metadata: HashMap::from([
+                ("general.architecture".into(), Value::String("llama".into())),
+                ("llama.block_count".into(), Value::U32(2)),
+                ("llama.embedding_length".into(), Value::U32(32)),
+                ("llama.attention.head_count".into(), Value::U32(1)),
+                ("llama.context_length".into(), Value::U32(128)),
+            ]),
+            tensor_infos: HashMap::from([
+                (
+                    "blk.0.attn_q.weight".into(),
+                    TensorInfo {
+                        ggml_dtype: GgmlDType::Q4_0,
+                        shape: vec![32, 2].into(),
+                        offset: 0,
+                    },
+                ),
+                (
+                    "blk.1.attn_q.weight".into(),
+                    TensorInfo {
+                        ggml_dtype: GgmlDType::F16,
+                        shape: vec![32, 2].into(),
+                        offset: 0,
+                    },
+                ),
+                (
+                    "token_embd.weight".into(),
+                    TensorInfo {
+                        ggml_dtype: GgmlDType::F32,
+                        shape: vec![32, 2].into(),
+                        offset: 0,
+                    },
+                ),
+            ]),
+            tensor_data_offset: 0,
+        }
+    }
+
+    #[test]
+    fn quantized_blocks_and_tied_embeddings_are_counted() {
+        let inventory = ModelInventory::read(&content()).unwrap();
+        assert_eq!(inventory.layer_bytes, vec![36, 128]);
+        assert_eq!(inventory.output_bytes, 256);
+    }
+
+    #[test]
+    fn split_gguf_is_refused_before_weight_accounting() {
+        let mut content = content();
+        content.metadata.insert("split.count".into(), Value::U16(2));
+        let error = ModelInventory::read(&content).unwrap_err();
+        assert!(error.to_string().contains("split GGUF"));
+    }
+
+    #[test]
+    fn malformed_tensor_dimensions_and_missing_layers_are_refused() {
+        let mut invalid = content();
+        invalid
+            .tensor_infos
+            .get_mut("blk.0.attn_q.weight")
+            .unwrap()
+            .shape = vec![31].into();
+        assert!(ModelInventory::read(&invalid).is_err());
+        let mut missing = content();
+        missing.tensor_infos.remove("blk.1.attn_q.weight");
+        assert!(ModelInventory::read(&missing).is_err());
     }
 }
