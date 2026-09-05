@@ -1,5 +1,46 @@
 # Measurements
 
+## Mac M3 + Radeon RX 7600, real two-host GPU chat — 2026-09-05
+
+Latticed `392c25e`, llama.cpp `85d5703a3b1b47243213a39059a6e3076c92733a`.
+Master: Apple M3, Metal (`MTL0`), macOS. Worker: gaming, Radeon RX 7600,
+Vulkan (`Vulkan0`, RADV NAVI33), Linux. Native RPC travelled through paired QUIC
+between `192.168.7.40` and `192.168.7.62:47900`; its TCP endpoints stayed on loopback.
+
+Model: **SmolLM2-135M-Instruct Q4_K_M**, 105,454,144 bytes, 30 transformer layers.
+SHA-256: `ed5fa30c487b282ec156c29062f1222e5c20875a944ac98289dbd242e947f747`.
+The GGUF was supplied on the master; assigned tensors transferred to the worker.
+
+The successful discovery run used the default 1 GiB memory reserve and:
+
+```bash
+MODEL="$(./scripts/fetch-test-model.sh)"
+latticed chat --model "$MODEL" --context 512 --tokens 32 \
+  --prompt 'What is the capital of France? Answer with just the city name.'
+```
+
+| Observation | Result |
+| --- | --- |
+| Worker discovery | Automatic; no address or new pairing code supplied |
+| Available GPU memory reported before placement | RX 7600: approximately 6.9 GiB; M3: approximately 11.8 GiB |
+| Transformer layers | RX 7600: 14; M3: 16, plus output on M3 |
+| GPU offload | 31/31 layer slots; remote model, KV, and compute buffers confirmed |
+| Text | `The capital of France is Paris.` |
+| Prompt evaluation | 200.2 tokens/sec, 44 prompt tokens |
+| Generation | 19.1 tokens/sec, 8 output tokens |
+
+These are short functional smoke measurements, not a sustained performance
+benchmark or a speedup claim. The tiny model fits on either host alone.
+
+Live GPU budgets affected placement: an earlier successful run reported only
+1.2 GiB available on gaming and assigned it one layer. An intervening attempt
+was refused by the memory planner; later runs reported substantially more
+available memory and succeeded. Vulkan exposes driver memory budgets, which can
+change between runs; the observations do not identify the source of that pressure.
+
+The 135M model also declined a simple counting request in both local and
+distributed runs. It is a transport/execution fixture, not a quality benchmark.
+
 ## Single-node, candle engine — 2026-08-26
 
 **This is not the M0 gate.** M0 needs a model that does not fit on one machine,

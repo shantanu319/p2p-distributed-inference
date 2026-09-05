@@ -88,7 +88,24 @@ pub async fn run(dir: &Path, key: &DeviceKey, options: Options) -> Result<()> {
         options.context,
         &devices,
         u64::from(options.reserve_mib) << 20,
-    )?;
+    )
+    .with_context(|| {
+        let memory = devices
+            .iter()
+            .map(|device| {
+                format!(
+                    "{}: {:.0} MiB available",
+                    device.description,
+                    device.free_memory as f64 / 1048576.0
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!(
+            "GPU placement failed with a reserve of at least {} MiB per device ({memory})",
+            options.reserve_mib
+        )
+    })?;
     eprintln!(
         "Using {} GPU(s); {} layers including output, context {}.",
         devices.len(),
