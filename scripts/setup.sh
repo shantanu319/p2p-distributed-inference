@@ -15,12 +15,19 @@ set -euo pipefail
 MIN_RUST="1.85.0"          # edition 2024
 PREFIX="${PREFIX:-$HOME/.local/bin}"
 MODE="install"
+INFERENCE=0
 
 for arg in "$@"; do
     case "$arg" in
         --serve) MODE="serve" ;;
         --check) MODE="check" ;;
-        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --inference) INFERENCE=1 ;;
+        -h|--help)
+            printf '%s\n' 'Usage: setup.sh [--inference] [--check|--serve]' \
+                'Builds and installs latticed and its master/worker launchers.' \
+                '--inference also builds the GPU inference runtime.' \
+                '--check only checks prerequisites; --serve starts the legacy listener.'
+            exit 0 ;;
         *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -76,7 +83,17 @@ if [ "$MISSING" -ne 0 ]; then
     note "Install the above, then run this script again."
     exit 1
 fi
-[ "$MODE" = "check" ] && { note "All prerequisites present."; exit 0; }
+if [ "$MODE" = "check" ]; then
+    if [ "$INFERENCE" -eq 1 ]; then
+        "$REPO/scripts/setup-engine.sh" --check
+    fi
+    note "All prerequisites present."
+    exit 0
+fi
+
+if [ "$INFERENCE" -eq 1 ]; then
+    "$REPO/scripts/setup-engine.sh"
+fi
 
 # --- build -------------------------------------------------------------------
 note "Building (first build fetches crates and takes a few minutes)"
