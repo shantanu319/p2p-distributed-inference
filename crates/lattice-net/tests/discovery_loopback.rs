@@ -11,13 +11,17 @@ fn a_browsing_device_finds_an_advertising_one() {
     let id = "0123456789abcdef".parse().unwrap();
     let mut advertiser = Discovery::new().unwrap();
     advertiser
-        .advertise(&Advertisement {
-            device_id: id,
-            name: "test-advertiser".into(),
-            platform: "macos-aarch64".into(),
-            total_memory: 17_179_869_184,
-            port: 47_600,
-        })
+        .advertise_role(
+            &Advertisement {
+                device_id: id,
+                name: "test-advertiser".into(),
+                platform: "macos-aarch64".into(),
+                total_memory: 17_179_869_184,
+                port: 47_600,
+            },
+            "master",
+            Some(47_601),
+        )
         .unwrap();
 
     let browser = Discovery::new().unwrap();
@@ -35,6 +39,8 @@ fn a_browsing_device_finds_an_advertising_one() {
         assert_eq!(peer.platform, "macos-aarch64");
         assert_eq!(peer.total_memory, 17_179_869_184);
         assert_eq!(peer.protocol, lattice_net::discovery::PROTOCOL_VERSION);
+        assert_eq!(peer.role.as_deref(), Some("master"));
+        assert_eq!(peer.pairing_port, Some(47_601));
         assert!(peer.addrs.iter().all(|a| a.port() == 47_600));
         assert!(!peer.addrs.is_empty(), "peer resolved with no addresses");
         return;
