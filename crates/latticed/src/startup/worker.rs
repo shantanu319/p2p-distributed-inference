@@ -20,6 +20,40 @@ pub async fn run(
     facts: &HostFacts,
     options: WorkerOptions,
 ) -> Result<()> {
+    tokio::select! {
+        result = run_inner(dir, key, facts, options) => result,
+        result = shutdown_signal() => { result?; Ok(()) },
+    }
+}
+
+async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    tokio::signal::ctrl_c().await
+}
+
+struct RuntimeGuard(Arc<Node>);
+
+impl Drop for RuntimeGuard {
+    fn drop(&mut self) {
+        self.0.authorize_master(None);
+    }
+}
+
+async fn run_inner(
+    dir: &Path,
+    key: &DeviceKey,
+    facts: &HostFacts,
+    options: WorkerOptions,
+) -> Result<()> {
     let mut supplied_code = options
         .code
         .as_deref()
@@ -27,6 +61,29 @@ pub async fn run(
         .transpose()?;
     let mut saved = read_saved(dir)?;
     let service = Arc::new(Service::start(dir, key, facts, &options.common, None)?);
+    let runtime =
+        crate::runtime::Engine::locate(options.engine_dir.as_deref()).and_then(|engine| {
+            println!("Detecting GPUs; first initialization can take a minute.");
+            let device =
+                crate::runtime::select_device(&engine.devices()?, options.device.as_deref())?;
+            println!(
+                "GPU inference enabled on {} ({})",
+                device.name, device.description
+            );
+            crate::runtime::WorkerRuntime::new(engine, device, dir)
+        });
+    match runtime {
+        Ok(runtime) => service.node.set_runtime(Arc::new(runtime)),
+        Err(error)
+            if options.require_gpu || options.engine_dir.is_some() || options.device.is_some() =>
+        {
+            return Err(error);
+        }
+        Err(error) => eprintln!(
+            "Network-only worker: {error:#}. Run ./scripts/setup-engine.sh, then restart with --require-gpu."
+        ),
+    }
+    let _runtime_guard = RuntimeGuard(service.node.clone());
     tokio::spawn(serve_worker(service.clone()));
     println!("Looking for a master. Keep this terminal open; Ctrl-C stops the worker.");
     let mut last_error = String::new();
@@ -90,8 +147,9 @@ pub async fn run(
         };
         let node = service.node.clone();
         let serving_conn = conn.clone();
-        let serving =
-            tokio::spawn(async move { dispatch::serve(serving_conn, node.clone(), node).await });
+        let serving = tokio::spawn(async move {
+            dispatch::serve_with_rpc(serving_conn, node.clone(), node.clone(), node).await
+        });
         let registration = tokio::time::timeout(
             REQUEST_TIMEOUT,
             control::request(
@@ -129,6 +187,7 @@ pub async fn run(
             tokio::time::sleep(Duration::from_secs(3)).await;
             continue;
         }
+        service.node.authorize_master(Some(conn.peer_id()));
         target.id = Some(conn.peer_id());
         write_saved(dir, &target)?;
         saved = Some(target);
@@ -140,6 +199,7 @@ pub async fn run(
         last_error.clear();
         conn.inner.closed().await;
         serving.abort();
+        service.node.authorize_master(None);
         println!("Master disconnected; reconnecting automatically");
         tokio::time::sleep(Duration::from_secs(3)).await;
     }
@@ -230,10 +290,8 @@ fn explicit_address(text: &str) -> Result<Option<SocketAddr>> {
             .ok()
             .map(|ip| SocketAddr::from((ip, 47900)))
     });
-    if let Some(addr) = addr {
-        if !addr.is_ipv4() || addr.port() == 0 || addr.ip().is_unspecified() {
-            bail!("--master requires a usable IPv4 address and nonzero port");
-        }
+    if addr.is_some_and(|addr| !addr.is_ipv4() || addr.port() == 0 || addr.ip().is_unspecified()) {
+        bail!("--master requires a usable IPv4 address and nonzero port");
     }
     Ok(addr)
 }

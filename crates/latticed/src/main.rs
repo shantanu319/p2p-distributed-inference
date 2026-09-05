@@ -8,6 +8,7 @@ mod host;
 mod node;
 mod startup;
 mod pairing_session;
+mod runtime;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};

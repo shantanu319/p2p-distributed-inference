@@ -29,6 +29,7 @@ pub struct Node {
     /// not exist yet, so the file gets here by whatever means the user chose.
     model: Option<PathBuf>,
     shard: ShardThread,
+    runtime: RwLock<Option<Arc<crate::runtime::WorkerRuntime>>>,
 }
 
 /// Everything touching the shard happens on one thread.
@@ -76,10 +77,16 @@ impl ShardThread {
                                         kv_bytes: stats.kv_bytes,
                                     }
                                 }
-                                Err(e) => Response::Refused(format!("could not load the shard: {e}")),
+                                Err(e) => {
+                                    Response::Refused(format!("could not load the shard: {e}"))
+                                }
                             });
                         }
-                        Job::Run { session, step, reply } => {
+                        Job::Run {
+                            session,
+                            step,
+                            reply,
+                        } => {
                             let _ = reply.send(run_step(held.as_mut(), session, step));
                         }
                         Job::Drop { session } => {
@@ -117,6 +124,17 @@ impl Node {
             identity: (id, facts.name.clone(), facts.platform.clone()),
             model,
             shard: ShardThread::spawn(),
+            runtime: RwLock::new(None),
+        }
+    }
+
+    pub fn set_runtime(&self, runtime: Arc<crate::runtime::WorkerRuntime>) {
+        *self.runtime.write().expect("runtime poisoned") = Some(runtime);
+    }
+
+    pub fn authorize_master(&self, master: Option<DeviceId>) {
+        if let Some(runtime) = self.runtime.read().expect("runtime poisoned").as_ref() {
+            runtime.authorize(master);
         }
     }
 
@@ -197,6 +215,13 @@ impl Node {
 impl ControlHandler for Node {
     fn handle(&self, from: DeviceId, request: Request) -> Response {
         match request {
+            Request::InferenceInfo => match self.runtime.read().expect("runtime poisoned").as_ref() {
+                Some(runtime) => match runtime.capabilities(from) {
+                    Ok(info) => Response::InferenceInfo(info),
+                    Err(error) => Response::Refused(error.to_string()),
+                },
+                None => Response::Refused("GPU inference unavailable; run ./scripts/setup-engine.sh and restart latticed worker".into()),
+            },
             Request::Hello => Response::Identity {
                 device_id: self.identity.0,
                 name: self.identity.1.clone(),
@@ -205,7 +230,6 @@ impl ControlHandler for Node {
             Request::Provision(peers) => self.accept_introductions(from, peers),
             Request::LoadShard(spec) => self.load_shard(spec),
             Request::RegisterWorker { .. } => Response::Refused("this device is not running as master".into()),
-            Request::InferenceInfo => Response::Refused("GPU runtime is unavailable".into()),
         }
     }
 }
@@ -214,12 +238,18 @@ impl ControlHandler for Node {
 impl Executor for Node {
     async fn run(&self, session: u64, step: Step) -> Result<Payload, String> {
         let (reply, answer) = tokio::sync::oneshot::channel();
-        let job = Job::Run { session, step, reply };
+        let job = Job::Run {
+            session,
+            step,
+            reply,
+        };
         self.shard
             .jobs
             .send(job)
             .map_err(|_| "the shard thread is gone".to_string())?;
-        answer.await.map_err(|_| "the shard thread died mid-step".to_string())?
+        answer
+            .await
+            .map_err(|_| "the shard thread died mid-step".to_string())?
     }
 
     fn drop_session(&self, session: u64) {
@@ -233,4 +263,17 @@ pub fn roster_for(target: DeviceId, all: &[PairedPeer]) -> Vec<Introduction> {
         .filter(|peer| peer.device_id != target)
         .map(Introduction::of)
         .collect()
+}
+
+#[async_trait::async_trait]
+impl lattice_net::RpcHandler for Node {
+    async fn connect(&self, from: DeviceId) -> Result<lattice_net::RpcSession, String> {
+        let runtime = self
+            .runtime
+            .read()
+            .expect("runtime poisoned")
+            .clone()
+            .ok_or_else(|| "GPU inference unavailable; run ./scripts/setup-engine.sh".to_owned())?;
+        lattice_net::RpcHandler::connect(runtime.as_ref(), from).await
+    }
 }

@@ -51,6 +51,12 @@ pub struct MasterOptions {
 
 #[derive(Args)]
 pub struct WorkerOptions {
+    #[arg(long, help = "Inference engine installation directory")]
+    engine_dir: Option<PathBuf>,
+    #[arg(long, help = "Require a working GPU inference engine")]
+    require_gpu: bool,
+    #[arg(long, help = "Exact GPU name reported by lattice-engine-info")]
+    device: Option<String>,
     #[command(flatten)]
     common: CommonOptions,
     #[arg(
@@ -183,7 +189,9 @@ async fn serve_worker(service: Arc<Service>) {
             Ok(Some(Ok(conn))) => {
                 let node = service.node.clone();
                 tokio::spawn(async move {
-                    let _ = dispatch::serve(Arc::new(conn), node.clone(), node).await;
+                    let _ =
+                        dispatch::serve_with_rpc(Arc::new(conn), node.clone(), node.clone(), node)
+                            .await;
                 });
             }
             Ok(Some(Err(error))) => eprintln!("refused a connection: {error}"),
