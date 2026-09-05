@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+for binary in "$SCRIPT_DIR/latticed" "$SCRIPT_DIR/../target/release/latticed"; do
+    if [ -x "$binary" ]; then
+        exec "$binary" worker "$@"
+    fi
+done
+if command -v latticed >/dev/null 2>&1; then
+    exec latticed worker "$@"
+fi
+printf '%s\n' 'latticed is missing. Run ./scripts/setup.sh from the repository, then retry.' >&2
+exit 127

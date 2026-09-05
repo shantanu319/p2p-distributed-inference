@@ -86,6 +86,8 @@ cargo build --release --locked --manifest-path "$REPO/Cargo.toml" -p latticed
 BUILT="${CARGO_TARGET_DIR:-$REPO/target}/release/latticed"
 mkdir -p "$PREFIX"
 install -m 0755 "$BUILT" "$PREFIX/latticed"
+install -m 0755 "$REPO/scripts/latticed-master" "$PREFIX/latticed-master"
+install -m 0755 "$REPO/scripts/latticed-worker" "$PREFIX/latticed-worker"
 ok "installed $PREFIX/latticed"
 
 case ":$PATH:" in
@@ -96,27 +98,15 @@ esac
 
 "$PREFIX/latticed" id
 
-# --- the two things that silently break discovery ----------------------------
-if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-    note "ufw is active. Lattice needs inbound UDP for mDNS and its own port:
-  sudo ufw allow 5353/udp comment 'mDNS'
-  sudo ufw allow 47900/udp comment 'lattice'   # match the --port you serve on"
-elif command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
-    note "firewalld is active. Lattice needs inbound UDP for mDNS and its own port:
-  sudo firewall-cmd --add-service=mdns --permanent
-  sudo firewall-cmd --add-port=47900/udp --permanent   # match your --port
-  sudo firewall-cmd --reload"
-fi
+note "On your main machine:
+  latticed master
 
-note "Next, on this machine:
-  latticed serve --port 47900        advertise and serve paired devices
+On each other machine:
+  latticed worker
 
-On the machine you want to pair with:
-  latticed host                      shows a code, prints the command to run here
-
-Then, back here:
-  latticed discover                  list devices on the LAN
-  latticed probe <device-id>         measure the link (see bench/README.md)"
+The commands discover peers and configure supported Linux firewalls for your LAN.
+For the first connection, enter the code shown by the master on the worker.
+The latticed-master and latticed-worker shell launchers work the same way."
 
 if [ "$MODE" = "serve" ]; then
     note "Starting: latticed serve --port 47900   (ctrl-c to stop)"
